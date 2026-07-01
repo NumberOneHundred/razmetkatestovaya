@@ -423,6 +423,7 @@ export default function Home(){
                       {users.filter(u=>u.role==="editor").map(u=><option key={u.email} value={u.email}>{u.name}</option>)}
                     </select>}
                   <Btn onClick={()=>setSelId(dlg.id)} color={C.a}>Открыть →</Btn>
+                  {mode==="manager"&&<Btn onClick={()=>{if(confirm("Удалить «"+dlg.title+"»?"))remove(ref(db,"ann_dialogues/"+dlg.id));}} color={C.r} bg={C.rs}>🗑</Btn>}
                 </div>
               </div>;})}
           </div>}
