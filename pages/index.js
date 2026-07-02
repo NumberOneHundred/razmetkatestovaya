@@ -164,18 +164,76 @@ async function parseXlsx(file){
   const sheetIndices={};
   wb.SheetNames.forEach((n,i)=>{sheetIndices[n]=String(i+1);});
   const autoSheets={},manualSheets={};
+  let hasPrefix=false;
 
   for(const name of wb.SheetNames){
     if(skip.some(s=>name.toLowerCase().includes(s)))continue;
+    if(name==="empty"||name==="Sheet1")continue;
     const prefix=name.match(/^(s\d+)/);
-    if(!prefix)continue;
-    const p=prefix[1];
-    if(name.includes("_auto")||/^s\d+_[A-Z]/.test(name)&&!name.includes("!")){
-      autoSheets[p]=name;
-    } else {
-      if(!manualSheets[p])manualSheets[p]=[];
-      manualSheets[p].push(name);
+    if(prefix){
+      hasPrefix=true;
+      const p=prefix[1];
+      if(name.includes("_auto")||/^s\d+_[A-Z]/.test(name)&&!name.includes("!")){
+        autoSheets[p]=name;
+      } else {
+        if(!manualSheets[p])manualSheets[p]=[];
+        manualSheets[p].push(name);
+      }
     }
+  }
+
+  // Fallback: sheets without s-prefix (named "1","2","3" etc.)
+  if(!hasPrefix){
+    const dialogues=[];
+    for(const name of wb.SheetNames){
+      if(skip.some(s=>name.toLowerCase().includes(s)))continue;
+      if(name==="empty"||name==="Sheet1")continue;
+      const ws=wb.Sheets[name];
+      const data=XLSX.utils.sheet_to_json(ws,{header:1});
+      if(data.length<3)continue;
+      // Find header row (row with №/pair_id and реплика/Диалоговая пара)
+      let headerRow=1;
+      for(let r=0;r<Math.min(data.length,3);r++){
+        const row=data[r];
+        if(row&&row.some&&row.some(v=>String(v||"").includes("реплика")||String(v||"").includes("Диалоговая")||String(v||"").includes("pair_id")))
+          {headerRow=r;break;}
+      }
+      const headers=data[headerRow]||[];
+      // Find column indices
+      let textCol=-1,numCol=-1;
+      headers.forEach((h,ci)=>{
+        const hl=String(h||"").toLowerCase();
+        if(textCol===-1&&(hl.includes("реплика")||hl.includes("диалоговая")||hl.includes("текст пары")))textCol=ci;
+        if(numCol===-1&&(hl==="№"||hl==="pair_id"||hl==="num_replic"))numCol=ci;
+      });
+      if(textCol===-1)textCol=1;
+      if(numCol===-1)numCol=0;
+
+      const pairs=[];let sessionId="";const annotations={};
+      const sIdx=sheetIndices[name];const imgMap=images[sIdx]||{};
+
+      for(let r=headerRow+1;r<data.length;r++){
+        const row=data[r];if(!row||!row[textCol])continue;
+        const txt=String(row[textCol]||"");
+        const pairNum=String(row[numCol]||r);
+        if(/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(txt.trim())){sessionId=txt.trim();continue;}
+        pairs.push({num:pairNum,text:txt,board:String(row[2]||""),image:String(row[3]||""),boardOps:findBoardOps(row),imageData:imgMap[r]||""});
+        // Parse existing annotations from criteria columns
+        for(let c=0;c<headers.length;c++){
+          const code=String(headers[c]||"").trim();
+          const val=row[c];
+          if(CRITERIA_ORDER.includes(code)&&val!==undefined&&val!==null&&val!==""){
+            if(!annotations[code])annotations[code]={};
+            annotations[code][pairNum]=String(val);
+          }
+        }
+      }
+      if(pairs.length>0){
+        const id=name.replace(/[.#$/[\]!+ ]/g,"_");
+        dialogues.push({id,title:name,pairs,status:Object.keys(annotations).length>0?"review":"unassigned",assignedTo:null,annotations,autoScores:{},sessionId});
+      }
+    }
+    return dialogues;
   }
 
   const dialogues=[];
