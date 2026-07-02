@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { db, ref, set, onValue, remove } from "../lib/firebase";
 import { CRITERIA, CRITERIA_ORDER, GROUP_COLORS } from "../lib/criteria";
+import { parseBoardOps, renderBoardSvg } from "../lib/board";
 import Head from "next/head";
 
 const C = {
@@ -69,6 +70,12 @@ function PairCard({pair,score,autoScore,onScore,criterion,showDiff}){
       {viz}
     </div>
     {pair.board&&<div style={{marginTop:6,padding:"6px 10px",background:C.s3,borderRadius:6,fontSize:11,color:C.m}}>📋 {pair.board}</div>}
+    {pair.boardOps&&(()=>{
+      const ops=parseBoardOps(pair.boardOps);
+      const svg=renderBoardSvg(ops);
+      if(!svg)return null;
+      return<div style={{marginTop:8,border:"1px solid "+C.b,borderRadius:8,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:svg}}/>;
+    })()}
   </div>;
 }
 
@@ -118,7 +125,7 @@ function UsersModal({users,onAdd,onRemove,onClose}){
           <input value={name} onChange={e=>setName(e.target.value)} placeholder="Имя" style={{flex:1,padding:"7px 10px",borderRadius:6,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:12}}/>
         </div>
         <div style={{display:"flex",gap:6,marginBottom:10}}>
-          {["editor","reviewer","manager"].map(r=><Btn key={r} onClick={()=>setRole(r)} color={role===r?C.a:C.m} bg={role===r?C.as:"transparent"}>{r==="editor"?"✏️ Разметчик":r==="reviewer"?"👁 Ревьюер":"📊 Менеджер"}</Btn>)}
+          {["editor","manager"].map(r=><Btn key={r} onClick={()=>setRole(r)} color={role===r?C.a:C.m} bg={role===r?C.as:"transparent"}>{r==="editor"?"✏️ Разметчик":"📊 Менеджер"}</Btn>)}
         </div>
         <Btn onClick={()=>{if(email.trim()&&name.trim()){onAdd({email:email.trim(),name:name.trim(),role});setEmail("");setName("");}}} color={C.g} bg={C.gs}>+ Добавить</Btn>
       </div>
@@ -126,11 +133,26 @@ function UsersModal({users,onAdd,onRemove,onClose}){
 }
 
 /* ═══ IMPORT ═══ */
+function findBoardOps(row){
+  for(let c=0;c<row.length;c++){
+    const v=String(row[c]||"");
+    if(v.includes("board_ops"))return v;
+  }
+  return "";
+}
+
 async function parseXlsx(file){
   const XLSX=await import("xlsx");
   const buf=await file.arrayBuffer();
   const wb=XLSX.read(buf,{type:"array"});
   const skip=["критери","empty"];
+
+  // Detect labeled_images format (has "payload" column)
+  const firstSheet=wb.Sheets[wb.SheetNames[0]];
+  const firstHeaders=XLSX.utils.sheet_to_json(firstSheet,{header:1})[0]||[];
+  if(firstHeaders.includes("payload")&&firstHeaders.includes("session_id")){
+    return parseLabeledImages(wb);
+  }
   const autoSheets={},manualSheets={};
 
   for(const name of wb.SheetNames){
@@ -182,7 +204,7 @@ async function parseXlsx(file){
         const txt=String(row[1]||"");
         if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(txt.trim())){sessionId=txt.trim();continue;}
         if(/^#?id.?сессии$/i.test(txt.trim())||/^session.?id$/i.test(txt.trim())){sessionId=String(row[0]||"");continue;}
-        pairs.push({num:String(row[0]||r-1),text:txt,board:String(row[2]||""),image:String(row[3]||"")});
+        pairs.push({num:String(row[0]||r-1),text:txt,board:String(row[2]||""),image:String(row[3]||""),boardOps:findBoardOps(row)});
       }
       if(pairs.length>0){
         const id=autoSheets[p].replace(/[.#$/[\]!+ ]/g,"_");
@@ -205,7 +227,7 @@ async function parseXlsx(file){
         const txt=String(row[1]||"");
         if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(txt.trim())){sessionId=txt.trim();continue;}
         if(/^#?id.?сессии$/i.test(txt.trim())||/^session.?id$/i.test(txt.trim())){sessionId=pairNum;continue;}
-        pairs.push({num:pairNum,text:txt,board:String(row[2]||""),image:String(row[3]||"")});
+        pairs.push({num:pairNum,text:txt,board:String(row[2]||""),image:String(row[3]||""),boardOps:findBoardOps(row)});
         for(let c2=4;c2<headers.length;c2++){
           const code=String(headers[c2]||"").trim();
           const val=row[c2];
@@ -223,6 +245,43 @@ async function parseXlsx(file){
     }
   }
   return dialogues;
+}
+
+function parseLabeledImages(wb){
+  const XLSX=require("xlsx");
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  const data=XLSX.utils.sheet_to_json(ws,{header:1});
+  const headers=data[0]||[];
+  const payloadCol=headers.indexOf("payload");
+  const textCol=headers.indexOf("text");
+  const numCol=headers.indexOf("num_replic");
+  const sessionCol=headers.indexOf("session_id");
+  const payloadTextCol=headers.indexOf("payload_text");
+
+  const sessions={};
+  for(let r=1;r<data.length;r++){
+    const row=data[r];if(!row)continue;
+    const sid=String(row[sessionCol]||"").trim();
+    if(!sid)continue;
+    if(!sessions[sid])sessions[sid]={pairs:[],annotations:{},sessionId:sid};
+    const pairNum=String(row[numCol]||r);
+    const text=String(row[textCol]||row[payloadTextCol]||"");
+    const payload=String(row[payloadCol]||"");
+    sessions[sid].pairs.push({num:pairNum,text,board:"",image:"",boardOps:payload.includes("board_ops")?payload:""});
+    for(let c=0;c<headers.length;c++){
+      const code=String(headers[c]||"").trim();
+      const val=row[c];
+      if(CRITERIA_ORDER.includes(code)&&val!==undefined&&val!==null&&val!==""){
+        if(!sessions[sid].annotations[code])sessions[sid].annotations[code]={};
+        sessions[sid].annotations[code][pairNum]=String(val);
+      }
+    }
+  }
+  return Object.entries(sessions).map(([sid,d])=>({
+    id:sid.replace(/[.#$/[\]-]/g,"_"),title:"session_"+sid.substring(0,8),
+    pairs:d.pairs,status:Object.keys(d.annotations).length>0?"review":"unassigned",
+    assignedTo:null,annotations:d.annotations,autoScores:{},sessionId:d.sessionId
+  }));
 }
 
 async function exportXlsx(dialogues){
@@ -288,7 +347,7 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
   function handleFinish(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"review");onBack();}
   function handleApprove(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"done");onBack();}
   function handleReject(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"annotating");onBack();}
-  const isReviewer=user.role==="reviewer"||user.role==="manager";
+  const isReviewer=user.role==="manager";
 
   return<div style={{minHeight:"100vh",background:C.bg}}>
     <div style={{borderBottom:"1px solid "+C.b,padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:C.bg+"ee"}}>
@@ -385,7 +444,7 @@ export default function Home(){
   }
 
   if(user&&sel){
-    const sd=showDiff&&(mode==="reviewer"||mode==="manager")&&Object.keys(sel.autoScores||{}).length>0;
+    const sd=showDiff&&mode==="manager"&&Object.keys(sel.autoScores||{}).length>0;
     return<><Head><title>Annotation — {sel.title}</title></Head>
       <AnnotatorScreen dialogue={sel} user={user} onBack={()=>setSelId(null)} showDiff={sd}/></>;
   }
@@ -402,7 +461,7 @@ export default function Home(){
           <span style={{fontSize:10,color:C.d,background:C.as,padding:"2px 8px",borderRadius:4}}>{user.name} • {mode==="manager"?"📊":mode==="editor"?"✏️":"👁"}</span>
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center"}}>
-          {(mode==="manager"||mode==="reviewer")&&<label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:C.m,cursor:"pointer"}}><input type="checkbox" checked={showDiff} onChange={e=>setShowDiff(e.target.checked)}/>⚡ Diff с auto</label>}
+          {mode==="manager"&&<label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:C.m,cursor:"pointer"}}><input type="checkbox" checked={showDiff} onChange={e=>setShowDiff(e.target.checked)}/>⚡ Diff с auto</label>}
           {mode==="manager"&&<><Btn onClick={()=>fileRef.current?.click()} color={C.g} bg={C.gs}>+ Импорт</Btn><input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleImport} style={{display:"none"}}/>
           <Btn onClick={()=>setShowUsers(true)} color={C.bl} bg={C.bls}>👥</Btn>
           {dialogues.length>0&&<Btn onClick={()=>exportXlsx(dialogues)} color={C.a} bg={C.as}>↓ Экспорт</Btn>}</>}
