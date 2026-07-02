@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { db, ref, set, onValue, remove } from "../lib/firebase";
 import { CRITERIA, CRITERIA_ORDER, GROUP_COLORS } from "../lib/criteria";
 import { parseBoardOps, renderBoardSvg } from "../lib/board";
+import { extractImages } from "../lib/images";
 import Head from "next/head";
 
 const C = {
@@ -70,6 +71,7 @@ function PairCard({pair,score,autoScore,onScore,criterion,showDiff}){
       {viz}
     </div>
     {pair.board&&<div style={{marginTop:6,padding:"6px 10px",background:C.s3,borderRadius:6,fontSize:11,color:C.m}}>📋 {pair.board}</div>}
+    {pair.imageData&&<div style={{marginTop:8}}><img src={pair.imageData} style={{maxWidth:"100%",borderRadius:8,border:"1px solid "+C.b}} alt="board"/></div>}
     {pair.boardOps&&(()=>{
       const ops=parseBoardOps(pair.boardOps);
       const svg=renderBoardSvg(ops);
@@ -147,12 +149,20 @@ async function parseXlsx(file){
   const wb=XLSX.read(buf,{type:"array"});
   const skip=["критери","empty"];
 
+  // Extract embedded images
+  let images={};
+  try { images=await extractImages(buf); } catch(e){ console.warn("Image extraction failed:",e); }
+
   // Detect labeled_images format (has "payload" column)
   const firstSheet=wb.Sheets[wb.SheetNames[0]];
   const firstHeaders=XLSX.utils.sheet_to_json(firstSheet,{header:1})[0]||[];
   if(firstHeaders.includes("payload")&&firstHeaders.includes("session_id")){
     return parseLabeledImages(wb);
   }
+
+  // Map sheet names to indices for image lookup
+  const sheetIndices={};
+  wb.SheetNames.forEach((n,i)=>{sheetIndices[n]=String(i+1);});
   const autoSheets={},manualSheets={};
 
   for(const name of wb.SheetNames){
@@ -204,7 +214,9 @@ async function parseXlsx(file){
         const txt=String(row[1]||"");
         if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(txt.trim())){sessionId=txt.trim();continue;}
         if(/^#?id.?сессии$/i.test(txt.trim())||/^session.?id$/i.test(txt.trim())){sessionId=String(row[0]||"");continue;}
-        pairs.push({num:String(row[0]||r-1),text:txt,board:String(row[2]||""),image:String(row[3]||""),boardOps:findBoardOps(row)});
+        const sheetIdx=sheetIndices[autoSheets[p]];
+        const imgMap=images[sheetIdx]||{};
+        pairs.push({num:String(row[0]||r-1),text:txt,board:String(row[2]||""),image:String(row[3]||""),boardOps:findBoardOps(row),imageData:imgMap[r]||""});
       }
       if(pairs.length>0){
         const id=autoSheets[p].replace(/[.#$/[\]!+ ]/g,"_");
@@ -227,7 +239,9 @@ async function parseXlsx(file){
         const txt=String(row[1]||"");
         if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(txt.trim())){sessionId=txt.trim();continue;}
         if(/^#?id.?сессии$/i.test(txt.trim())||/^session.?id$/i.test(txt.trim())){sessionId=pairNum;continue;}
-        pairs.push({num:pairNum,text:txt,board:String(row[2]||""),image:String(row[3]||""),boardOps:findBoardOps(row)});
+        const mSheetIdx=sheetIndices[mName];
+        const mImgMap=images[mSheetIdx]||{};
+        pairs.push({num:pairNum,text:txt,board:String(row[2]||""),image:String(row[3]||""),boardOps:findBoardOps(row),imageData:mImgMap[r]||""});
         for(let c2=4;c2<headers.length;c2++){
           const code=String(headers[c2]||"").trim();
           const val=row[c2];
