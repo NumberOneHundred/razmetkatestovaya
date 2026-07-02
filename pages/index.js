@@ -492,6 +492,7 @@ export default function Home(){
   const[showUsers,setShowUsers]=useState(false);
   const[loading,setLoading]=useState(true);
   const[showDiff,setShowDiff]=useState(true);
+  const[filterUser,setFilterUser]=useState("all");
   const fileRef=useRef(null);
 
   useEffect(()=>{
@@ -501,7 +502,14 @@ export default function Home(){
   },[]);
 
   const mode=user?.role||"editor";
-  const myDlgs=mode==="editor"?dialogues.filter(d=>d.assignedTo===user?.email||d.status==="unassigned"):dialogues;
+  const editors=useMemo(()=>[...new Set(dialogues.map(d=>d.assignedTo).filter(Boolean))],[dialogues]);
+  const userName=(email)=>{const u=users.find(u=>u.email===email);return u?u.name:email?email.split("@")[0]:"";};
+  const editorCounts=useMemo(()=>{const c={};dialogues.forEach(d=>{if(d.assignedTo){c[d.assignedTo]=(c[d.assignedTo]||0)+1;}});return c;},[dialogues]);
+  let myDlgs=mode==="editor"?dialogues.filter(d=>d.assignedTo===user?.email||d.status==="unassigned"):dialogues;
+  if(mode==="manager"&&filterUser!=="all"){
+    if(filterUser==="__none")myDlgs=myDlgs.filter(d=>!d.assignedTo);
+    else myDlgs=myDlgs.filter(d=>d.assignedTo===filterUser);
+  }
   const sel=dialogues.find(d=>d.id===selId);
 
   async function handleImport(e){
@@ -547,6 +555,12 @@ export default function Home(){
             return<div key={st} style={{background:s.c+"10",border:"1px solid "+s.c+"25",borderRadius:10,padding:"12px 14px",textAlign:"center"}}><div style={{fontSize:22,fontWeight:800,color:s.c}}>{cnt}</div><div style={{fontSize:10,color:s.c,marginTop:2}}>{s.l}</div></div>;})}
         </div>}
 
+        {mode==="manager"&&editors.length>0&&<div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:14}}>
+          <Btn onClick={()=>setFilterUser("all")} color={filterUser==="all"?C.a:C.m} bg={filterUser==="all"?C.as:"transparent"} style={{fontSize:10}}>Все ({dialogues.length})</Btn>
+          {editors.map(e=><Btn key={e} onClick={()=>setFilterUser(e)} color={filterUser===e?C.a:C.m} bg={filterUser===e?C.as:"transparent"} style={{fontSize:10}}>{userName(e)} ({editorCounts[e]||0})</Btn>)}
+          <Btn onClick={()=>setFilterUser("__none")} color={filterUser==="__none"?C.a:C.m} bg={filterUser==="__none"?C.as:"transparent"} style={{fontSize:10}}>∅ ({dialogues.filter(d=>!d.assignedTo).length})</Btn>
+        </div>}
+
         {myDlgs.length===0?
           <div style={{textAlign:"center",padding:"80px 20px",color:C.d}}><div style={{fontSize:40,marginBottom:12,opacity:.3}}>◇</div><div style={{fontSize:14}}>{mode==="manager"?"Импортируй диалоги":"Нет назначенных диалогов"}</div></div>:
           <div style={{display:"flex",flexDirection:"column",gap:4}}>
@@ -560,6 +574,7 @@ export default function Home(){
                   <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
                     <span style={{fontSize:13,fontWeight:600}}>{dlg.title}</span>
                     <Badge status={dlg.status}/>
+                    {dlg.assignedTo&&<span style={{fontSize:10,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.m}}>{userName(dlg.assignedTo)}</span>}
                     {hasAuto&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.d}}>🤖 auto</span>}
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -569,9 +584,9 @@ export default function Home(){
                   </div>
                 </div>
                 <div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
-                  {mode==="manager"&&dlg.status==="unassigned"&&
-                    <select onChange={e=>{if(e.target.value)assignDlg(dlg.id,e.target.value);}} defaultValue="" style={{padding:"4px 8px",borderRadius:5,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:11}}>
-                      <option value="" disabled>Назначить...</option>
+                  {mode==="manager"&&
+                    <select onChange={e=>{if(e.target.value)assignDlg(dlg.id,e.target.value);}} value={dlg.assignedTo||""} style={{padding:"4px 8px",borderRadius:5,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:11}}>
+                      <option value="">Не назначен</option>
                       {users.filter(u=>u.role==="editor").map(u=><option key={u.email} value={u.email}>{u.name}</option>)}
                     </select>}
                   {mode==="editor"&&dlg.status==="unassigned"&&<Btn onClick={()=>assignDlg(dlg.id,user.email)} color={C.g} bg={C.gs}>Забрать →</Btn>}
