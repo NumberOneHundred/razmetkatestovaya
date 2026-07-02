@@ -176,14 +176,17 @@ async function parseXlsx(file){
       // Only auto exists — create dialogue from auto
       const ws=wb.Sheets[autoSheets[p]];
       const data=XLSX.utils.sheet_to_json(ws,{header:1});
-      const pairs=[];
+      const pairs=[];let sessionId="";
       for(let r=2;r<data.length;r++){
         const row=data[r];if(!row||!row[1])continue;
-        pairs.push({num:String(row[0]||r-1),text:String(row[1]||""),board:String(row[2]||""),image:String(row[3]||"")});
+        const txt=String(row[1]||"");
+        if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(txt.trim())){sessionId=txt.trim();continue;}
+        if(/^#?id.?сессии$/i.test(txt.trim())||/^session.?id$/i.test(txt.trim())){sessionId=String(row[0]||"");continue;}
+        pairs.push({num:String(row[0]||r-1),text:txt,board:String(row[2]||""),image:String(row[3]||"")});
       }
       if(pairs.length>0){
         const id=autoSheets[p].replace(/[.#$/[\]!+ ]/g,"_");
-        dialogues.push({id,title:autoSheets[p],pairs,status:"unassigned",assignedTo:null,annotations:{},autoScores});
+        dialogues.push({id,title:autoSheets[p],pairs,status:"unassigned",assignedTo:null,annotations:{},autoScores,sessionId});
       }
       continue;
     }
@@ -194,11 +197,15 @@ async function parseXlsx(file){
       const headers=data[1]||[];
       const pairs=[];
       const annotations={};
+      let sessionId="";
 
       for(let r=2;r<data.length;r++){
         const row=data[r];if(!row||!row[1])continue;
         const pairNum=String(row[0]||r-1);
-        pairs.push({num:pairNum,text:String(row[1]||""),board:String(row[2]||""),image:String(row[3]||"")});
+        const txt=String(row[1]||"");
+        if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(txt.trim())){sessionId=txt.trim();continue;}
+        if(/^#?id.?сессии$/i.test(txt.trim())||/^session.?id$/i.test(txt.trim())){sessionId=pairNum;continue;}
+        pairs.push({num:pairNum,text:txt,board:String(row[2]||""),image:String(row[3]||"")});
         for(let c2=4;c2<headers.length;c2++){
           const code=String(headers[c2]||"").trim();
           const val=row[c2];
@@ -211,7 +218,7 @@ async function parseXlsx(file){
 
       if(pairs.length>0){
         const id=mName.replace(/[.#$/[\]!+ ]/g,"_");
-        dialogues.push({id,title:mName,pairs,status:Object.keys(annotations).length>0?"review":"unassigned",assignedTo:null,annotations,autoScores});
+        dialogues.push({id,title:mName,pairs,status:Object.keys(annotations).length>0?"review":"unassigned",assignedTo:null,annotations,autoScores,sessionId});
       }
     }
   }
@@ -221,10 +228,10 @@ async function parseXlsx(file){
 async function exportXlsx(dialogues){
   const XLSX=await import("xlsx");const wb=XLSX.utils.book_new();
   for(const dlg of dialogues){
-    const h2=["№","Диалоговая пара","Доска","Скриншот"].concat(CRITERIA_ORDER);
+    const h2=["ID сессии","№","Диалоговая пара","Доска","Скриншот"].concat(CRITERIA_ORDER);
     const rows=[h2];
     for(const pair of(dlg.pairs||[])){
-      const row=[pair.num,pair.text,pair.board,pair.image];
+      const row=[dlg.sessionId||"",pair.num,pair.text,pair.board,pair.image];
       for(const code of CRITERIA_ORDER){const ann=(dlg.annotations||{})[code];row.push(ann?ann[String(pair.num)]||"":"");}
       rows.push(row);
     }
@@ -279,12 +286,16 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
     set(ref(db,"ann_dialogues/"+dialogue.id+"/annotations/"+code+"/"+String(pairNum)),val);
   }
   function handleFinish(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"review");onBack();}
+  function handleApprove(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"done");onBack();}
+  function handleReject(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"annotating");onBack();}
+  const isReviewer=user.role==="reviewer"||user.role==="manager";
 
   return<div style={{minHeight:"100vh",background:C.bg}}>
     <div style={{borderBottom:"1px solid "+C.b,padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:C.bg+"ee"}}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <button onClick={onBack} style={{background:"transparent",border:"none",color:C.m,fontSize:14,cursor:"pointer"}}>←</button>
         <span style={{fontSize:14,fontWeight:700,color:C.t}}>{dialogue.title}</span>
+        {dialogue.sessionId&&<span style={{fontSize:9,color:C.d,background:C.s3,padding:"2px 6px",borderRadius:3,fontFamily:"'JetBrains Mono',monospace"}}>ID: {dialogue.sessionId.substring(0,8)}...</span>}
       </div>
       <div style={{display:"flex",alignItems:"center",gap:12}}>
         <div style={{width:120}}><Progress done={doneCells} total={totalCells}/></div>
@@ -314,7 +325,12 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
           <Btn onClick={()=>{setCrIdx(Math.max(0,crIdx-1));window.scrollTo(0,0);}} disabled={crIdx===0} color={C.m}>← Пред.</Btn>
           {crIdx<CRITERIA_ORDER.length-1?
             <Btn onClick={()=>{setCrIdx(crIdx+1);window.scrollTo(0,0);}} color={C.a} bg={C.as}>След. →</Btn>:
-            <Btn onClick={handleFinish} color={C.g} bg={C.gs}>✓ Завершить</Btn>}
+            isReviewer?
+              <div style={{display:"flex",gap:4}}>
+                <Btn onClick={handleApprove} color={C.g} bg={C.gs}>✓ Принять</Btn>
+                <Btn onClick={handleReject} color={C.r} bg={C.rs}>✕ Доработка</Btn>
+              </div>:
+              <Btn onClick={handleFinish} color={C.g} bg={C.gs}>✓ Завершить</Btn>}
         </div>
       </div>
 
@@ -325,7 +341,12 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
         <span style={{fontSize:12,color:C.d}}>{crIdx+1} / {CRITERIA_ORDER.length}</span>
         {crIdx<CRITERIA_ORDER.length-1?
           <Btn onClick={()=>{setCrIdx(crIdx+1);window.scrollTo(0,0);}} color={C.a} bg={C.as}>След. →</Btn>:
-          <Btn onClick={handleFinish} color={C.g} bg={C.gs}>✓ Завершить</Btn>}
+          isReviewer?
+            <div style={{display:"flex",gap:6}}>
+              <Btn onClick={handleApprove} color={C.g} bg={C.gs}>✓ Принять</Btn>
+              <Btn onClick={handleReject} color={C.r} bg={C.rs}>✕ На доработку</Btn>
+            </div>:
+            <Btn onClick={handleFinish} color={C.g} bg={C.gs}>✓ Завершить</Btn>}
       </div>
     </div>
   </div>;
@@ -349,7 +370,7 @@ export default function Home(){
   },[]);
 
   const mode=user?.role||"editor";
-  const myDlgs=mode==="editor"?dialogues.filter(d=>d.assignedTo===user?.email):dialogues;
+  const myDlgs=mode==="editor"?dialogues.filter(d=>d.assignedTo===user?.email||d.status==="unassigned"):dialogues;
   const sel=dialogues.find(d=>d.id===selId);
 
   async function handleImport(e){
@@ -422,6 +443,7 @@ export default function Home(){
                       <option value="" disabled>Назначить...</option>
                       {users.filter(u=>u.role==="editor").map(u=><option key={u.email} value={u.email}>{u.name}</option>)}
                     </select>}
+                  {mode==="editor"&&dlg.status==="unassigned"&&<Btn onClick={()=>assignDlg(dlg.id,user.email)} color={C.g} bg={C.gs}>Забрать →</Btn>}
                   <Btn onClick={()=>setSelId(dlg.id)} color={C.a}>Открыть →</Btn>
                   {mode==="manager"&&<Btn onClick={()=>{if(confirm("Удалить «"+dlg.title+"»?"))remove(ref(db,"ann_dialogues/"+dlg.id));}} color={C.r} bg={C.rs}>🗑</Btn>}
                 </div>
