@@ -49,16 +49,19 @@ function renderViz(text){
   </div>;
 }
 
-function PairCard({pair,score,autoScore,onScore,criterion,showDiff}){
+function PairCard({pair,score,autoScore,onScore,criterion,showDiff,comment,onComment}){
   const cr=CRITERIA[criterion];const scores=cr?cr.scores:["1","0"];
   const parts=parseDialogueText(pair.text);const viz=renderViz(pair.text);
+  const[showCom,setShowCom]=useState(false);const[comVal,setComVal]=useState(comment||"");
   return<div style={{background:C.s,border:"1px solid "+C.b,borderRadius:10,padding:14,marginBottom:8}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
       <div style={{display:"flex",alignItems:"center",gap:6}}>
         <span style={{fontSize:10,fontWeight:700,color:C.d,background:C.s3,padding:"2px 8px",borderRadius:4}}>#{pair.num}</span>
         {showDiff&&<DiffDot auto={autoScore} manual={score}/>}
       </div>
-      <div style={{display:"flex",gap:4}}>
+      <div style={{display:"flex",gap:4,alignItems:"center"}}>
+        {comment&&<span style={{fontSize:9,color:C.y}} title={comment}>💬</span>}
+        <button onClick={()=>setShowCom(!showCom)} style={{padding:"2px 6px",borderRadius:4,border:"1px solid "+C.b,background:showCom?C.ys:"transparent",color:showCom?C.y:C.d,fontSize:9,cursor:"pointer"}}>💬</button>
         {scores.map(s=>{const active=score===s;const sc=s==="0"?C.r:s==="1"?C.g:s==="2"?C.a:C.d;
           return<button key={s} onClick={()=>onScore(s)} style={{padding:"4px 10px",borderRadius:5,border:"1px solid "+(active?sc:C.b),background:active?sc+"20":"transparent",color:active?sc:C.m,fontSize:11,fontWeight:600,cursor:"pointer",minWidth:28}}>{s}</button>;})}
       </div>
@@ -71,13 +74,18 @@ function PairCard({pair,score,autoScore,onScore,criterion,showDiff}){
       {viz}
     </div>
     {pair.board&&<div style={{marginTop:6,padding:"6px 10px",background:C.s3,borderRadius:6,fontSize:11,color:C.m}}>📋 {pair.board}</div>}
-    {pair.imageData&&<div style={{marginTop:8}}><img src={pair.imageData} style={{maxWidth:"100%",borderRadius:8,border:"1px solid "+C.b}} alt="board"/></div>}
+    {pair.imageData&&<div style={{marginTop:8,background:"#fff",borderRadius:8,padding:4,display:"inline-block"}}><img src={pair.imageData} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt="board"/></div>}
     {pair.boardOps&&(()=>{
       const ops=parseBoardOps(pair.boardOps);
       const svg=renderBoardSvg(ops);
       if(!svg)return null;
       return<div style={{marginTop:8,border:"1px solid "+C.b,borderRadius:8,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:svg}}/>;
     })()}
+    {showCom&&<div style={{marginTop:8,display:"flex",gap:4}}>
+      <input value={comVal} onChange={e=>setComVal(e.target.value)} placeholder="Комментарий к реплике..." style={{flex:1,padding:"6px 10px",borderRadius:6,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:11}} onKeyDown={e=>{if(e.key==="Enter"&&comVal.trim()){onComment(comVal.trim());setShowCom(false);}}}/>
+      <Btn onClick={()=>{if(comVal.trim()){onComment(comVal.trim());setShowCom(false);}}} color={C.y} bg={C.ys}>→</Btn>
+    </div>}
+    {comment&&!showCom&&<div style={{marginTop:6,padding:"5px 10px",background:C.ys,border:"1px solid "+C.y+"30",borderRadius:6,fontSize:11,color:C.y}}>💬 {comment}</div>}
   </div>;
 }
 
@@ -396,8 +404,8 @@ function DiffSummary({dialogue}){
 /* ═══ ANNOTATOR SCREEN ═══ */
 function AnnotatorScreen({dialogue,user,onBack,showDiff}){
   const[crIdx,setCrIdx]=useState(0);
-  const[expanded,setExpanded]=useState(true);
   const[annotations,setAnnotations]=useState(dialogue.annotations||{});
+  const[comments,setComments]=useState(dialogue.comments||{});
   const code=CRITERIA_ORDER[crIdx];
   const pairs=dialogue.pairs||[];
   const autoScores=dialogue.autoScores||{};
@@ -407,14 +415,18 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
   const doneCells=CRITERIA_ORDER.reduce((s,c)=>{const ann=annotations[c]||{};return s+pairs.filter(p=>ann[String(p.num)]!==undefined&&ann[String(p.num)]!=="").length;},0);
   const curScores=annotations[code]||{};
   const curDone=pairs.filter(p=>curScores[String(p.num)]!==undefined&&curScores[String(p.num)]!=="").length;
-
-  // Count diffs for current criterion
   const curDiffs=pairs.filter(p=>{const a=autoForCriterion[String(p.num)],m=curScores[String(p.num)];return a!==undefined&&a!==""&&m!==undefined&&m!==""&&String(a)!==String(m);}).length;
+  const curComments=comments[code]||{};
 
   function setScore(pairNum,val){
     const newAnn={...annotations};if(!newAnn[code])newAnn[code]={};
     newAnn[code][String(pairNum)]=val;setAnnotations(newAnn);
     set(ref(db,"ann_dialogues/"+dialogue.id+"/annotations/"+code+"/"+String(pairNum)),val);
+  }
+  function setComment(pairNum,txt){
+    const newCom={...comments};if(!newCom[code])newCom[code]={};
+    newCom[code][String(pairNum)]=txt;setComments(newCom);
+    set(ref(db,"ann_dialogues/"+dialogue.id+"/comments/"+code+"/"+String(pairNum)),txt);
   }
   function handleFinish(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"review");onBack();}
   function handleApprove(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"done");onBack();}
@@ -422,6 +434,7 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
   const isReviewer=user.role==="manager";
 
   return<div style={{minHeight:"100vh",background:C.bg}}>
+    {/* Header */}
     <div style={{borderBottom:"1px solid "+C.b,padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:C.bg+"ee"}}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <button onClick={onBack} style={{background:"transparent",border:"none",color:C.m,fontSize:14,cursor:"pointer"}}>←</button>
@@ -434,50 +447,61 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
       </div>
     </div>
 
-    <div style={{maxWidth:900,margin:"0 auto",padding:"16px 18px"}}>
-      <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:12}}>
+    {/* Criteria tabs */}
+    <div style={{padding:"8px 18px",borderBottom:"1px solid "+C.b,position:"sticky",top:46,zIndex:99,background:C.bg+"ee"}}>
+      <div style={{display:"flex",gap:4,flexWrap:"wrap",maxWidth:900,margin:"0 auto"}}>
         {CRITERIA_ORDER.map((c,i)=>{
           const cr2=CRITERIA[c];const gc=GROUP_COLORS[cr2?.group]||C.a;const active=i===crIdx;
           const ann=annotations[c]||{};const filled=pairs.filter(p=>ann[String(p.num)]!==undefined&&ann[String(p.num)]!=="").length;const complete=filled===pairs.length;
-          // Check if this criterion has diffs
           const asc=autoScores[c]||{};const hasDiff=pairs.some(p=>{const av=asc[String(p.num)],mv=(annotations[c]||{})[String(p.num)];return av!==undefined&&av!==""&&mv!==undefined&&mv!==""&&String(av)!==String(mv);});
-          return<button key={c} onClick={()=>setCrIdx(i)} style={{padding:"3px 7px",borderRadius:4,border:"1px solid "+(active?gc:complete?C.g+"40":hasDiff?C.y+"40":C.b),background:active?gc+"20":complete?C.g+"10":hasDiff?C.y+"08":"transparent",color:active?gc:complete?C.g:hasDiff?C.y:C.d,fontSize:9,fontWeight:600,cursor:"pointer"}}>{c}{hasDiff?"⚡":""}</button>;
+          return<button key={c} onClick={()=>{setCrIdx(i);window.scrollTo(0,0);}} style={{padding:"3px 7px",borderRadius:4,border:"1px solid "+(active?gc:complete?C.g+"40":hasDiff?C.y+"40":C.b),background:active?gc+"20":complete?C.g+"10":hasDiff?C.y+"08":"transparent",color:active?gc:complete?C.g:hasDiff?C.y:C.d,fontSize:9,fontWeight:600,cursor:"pointer"}}>{c}{hasDiff?"⚡":""}</button>;
         })}
       </div>
+    </div>
 
-      <CriterionPanel code={code} expanded={expanded} onToggle={()=>setExpanded(!expanded)}/>
-
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-        <div style={{display:"flex",alignItems:"center",gap:12}}>
-          <span style={{fontSize:11,color:C.m}}>Размечено: {curDone}/{pairs.length}</span>
-          {showDiff&&curDiffs>0&&<span style={{fontSize:10,color:C.y,background:C.ys,padding:"2px 8px",borderRadius:4}}>⚡ {curDiffs} расхождений с auto</span>}
+    {/* Two-column layout: pairs left, criterion right */}
+    <div style={{display:"flex",maxWidth:1200,margin:"0 auto",padding:"16px 18px",gap:16}}>
+      {/* Left: pairs */}
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <span style={{fontSize:12,fontWeight:600,color:curDone===pairs.length?C.g:C.m}}>Отмечено {curDone} из {pairs.length}</span>
+            {curDone<pairs.length&&<span style={{fontSize:10,color:C.o}}>({pairs.length-curDone} без оценки)</span>}
+            {showDiff&&curDiffs>0&&<span style={{fontSize:10,color:C.y,background:C.ys,padding:"2px 8px",borderRadius:4}}>⚡ {curDiffs} расхождений</span>}
+          </div>
         </div>
-        <div style={{display:"flex",gap:6}}>
-          <Btn onClick={()=>{setCrIdx(Math.max(0,crIdx-1));window.scrollTo(0,0);}} disabled={crIdx===0} color={C.m}>← Пред.</Btn>
-          {crIdx<CRITERIA_ORDER.length-1?
-            <Btn onClick={()=>{setCrIdx(crIdx+1);window.scrollTo(0,0);}} color={C.a} bg={C.as}>След. →</Btn>:
-            isReviewer?
-              <div style={{display:"flex",gap:4}}>
-                <Btn onClick={handleApprove} color={C.g} bg={C.gs}>✓ Принять</Btn>
-                <Btn onClick={handleReject} color={C.r} bg={C.rs}>✕ Доработка</Btn>
-              </div>:
-              <Btn onClick={handleFinish} color={C.g} bg={C.gs}>✓ Завершить</Btn>}
+
+        {pairs.map(p=><PairCard key={p.num} pair={p} score={curScores[String(p.num)]||""} autoScore={showDiff?autoForCriterion[String(p.num)]:undefined} onScore={v=>setScore(p.num,v)} criterion={code} showDiff={showDiff} comment={curComments[String(p.num)]||""} onComment={txt=>setComment(p.num,txt)}/>)}
+
+        {/* Bottom stats + nav */}
+        <div style={{marginTop:16,paddingTop:12,borderTop:"1px solid "+C.b}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",marginBottom:12}}>
+            <span style={{fontSize:13,fontWeight:600,color:curDone===pairs.length?C.g:C.o}}>{curDone===pairs.length?"✓ Все реплики отмечены":"⚠ Отмечено "+curDone+" из "+pairs.length}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between"}}>
+            <Btn onClick={()=>{setCrIdx(Math.max(0,crIdx-1));window.scrollTo(0,0);}} disabled={crIdx===0} color={C.m}>← Пред.</Btn>
+            <span style={{fontSize:12,color:C.d}}>{crIdx+1} / {CRITERIA_ORDER.length}</span>
+            {crIdx<CRITERIA_ORDER.length-1?
+              <Btn onClick={()=>{setCrIdx(crIdx+1);window.scrollTo(0,0);}} color={C.a} bg={C.as}>След. →</Btn>:
+              isReviewer?
+                <div style={{display:"flex",gap:6}}>
+                  <Btn onClick={handleApprove} color={C.g} bg={C.gs}>✓ Принять</Btn>
+                  <Btn onClick={handleReject} color={C.r} bg={C.rs}>✕ На доработку</Btn>
+                </div>:
+                <Btn onClick={handleFinish} color={C.g} bg={C.gs}>✓ Завершить</Btn>}
+          </div>
         </div>
       </div>
 
-      {pairs.map(p=><PairCard key={p.num} pair={p} score={curScores[String(p.num)]||""} autoScore={showDiff?autoForCriterion[String(p.num)]:undefined} onScore={v=>setScore(p.num,v)} criterion={code} showDiff={showDiff}/>)}
-
-      <div style={{display:"flex",justifyContent:"space-between",marginTop:16,paddingTop:12,borderTop:"1px solid "+C.b}}>
-        <Btn onClick={()=>{setCrIdx(Math.max(0,crIdx-1));window.scrollTo(0,0);}} disabled={crIdx===0} color={C.m}>← Пред.</Btn>
-        <span style={{fontSize:12,color:C.d}}>{crIdx+1} / {CRITERIA_ORDER.length}</span>
-        {crIdx<CRITERIA_ORDER.length-1?
-          <Btn onClick={()=>{setCrIdx(crIdx+1);window.scrollTo(0,0);}} color={C.a} bg={C.as}>След. →</Btn>:
-          isReviewer?
-            <div style={{display:"flex",gap:6}}>
-              <Btn onClick={handleApprove} color={C.g} bg={C.gs}>✓ Принять</Btn>
-              <Btn onClick={handleReject} color={C.r} bg={C.rs}>✕ На доработку</Btn>
-            </div>:
-            <Btn onClick={handleFinish} color={C.g} bg={C.gs}>✓ Завершить</Btn>}
+      {/* Right: sticky criterion panel */}
+      <div style={{width:320,flexShrink:0,position:"sticky",top:90,alignSelf:"flex-start",maxHeight:"calc(100vh - 100px)",overflowY:"auto"}}>
+        <CriterionPanel code={code} expanded={true} onToggle={()=>{}}/>
+        <div style={{display:"flex",gap:6,marginTop:8}}>
+          <Btn onClick={()=>{setCrIdx(Math.max(0,crIdx-1));window.scrollTo(0,0);}} disabled={crIdx===0} color={C.m} style={{flex:1}}>← Пред.</Btn>
+          {crIdx<CRITERIA_ORDER.length-1?
+            <Btn onClick={()=>{setCrIdx(crIdx+1);window.scrollTo(0,0);}} color={C.a} bg={C.as} style={{flex:1}}>След. →</Btn>:
+            <Btn onClick={isReviewer?handleApprove:handleFinish} color={C.g} bg={C.gs} style={{flex:1}}>✓ {isReviewer?"Принять":"Завершить"}</Btn>}
+        </div>
       </div>
     </div>
   </div>;
