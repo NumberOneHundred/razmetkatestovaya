@@ -428,6 +428,12 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
     newCom[code][String(pairNum)]=txt;setComments(newCom);
     set(ref(db,"ann_dialogues/"+dialogue.id+"/comments/"+code+"/"+String(pairNum)),txt);
   }
+  function fillAll(val){
+    const newAnn={...annotations};if(!newAnn[code])newAnn[code]={};
+    pairs.forEach(p=>{newAnn[code][String(p.num)]=val;});
+    setAnnotations(newAnn);
+    pairs.forEach(p=>{set(ref(db,"ann_dialogues/"+dialogue.id+"/annotations/"+code+"/"+String(p.num)),val);});
+  }
   function handleFinish(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"review");onBack();}
   function handleApprove(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"done");onBack();}
   function handleReject(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"annotating");onBack();}
@@ -469,6 +475,12 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
             {curDone<pairs.length&&<span style={{fontSize:10,color:C.o}}>({pairs.length-curDone} без оценки)</span>}
             {showDiff&&curDiffs>0&&<span style={{fontSize:10,color:C.y,background:C.ys,padding:"2px 8px",borderRadius:4}}>⚡ {curDiffs} расхождений</span>}
           </div>
+        </div>
+
+        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12,padding:"8px 12px",background:C.s,border:"1px solid "+C.b,borderRadius:8}}>
+          <span style={{fontSize:10,color:C.d,whiteSpace:"nowrap"}}>Заполнить все:</span>
+          {(CRITERIA[code]?.scores||["1","0"]).map(s=>{const sc=s==="0"?C.r:s==="1"?C.g:s==="2"?C.a:C.d;
+            return<button key={s} onClick={()=>{if(confirm("Проставить «"+s+"» во все "+pairs.length+" реплик?"))fillAll(s);}} style={{padding:"4px 12px",borderRadius:5,border:"1px solid "+sc+"40",background:sc+"10",color:sc,fontSize:11,fontWeight:600,cursor:"pointer"}}>{s}</button>;})}
         </div>
 
         {pairs.map(p=><PairCard key={p.num} pair={p} score={curScores[String(p.num)]||""} autoScore={showDiff?autoForCriterion[String(p.num)]:undefined} onScore={v=>setScore(p.num,v)} criterion={code} showDiff={showDiff} comment={curComments[String(p.num)]||""} onComment={txt=>setComment(p.num,txt)}/>)}
