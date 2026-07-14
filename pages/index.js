@@ -364,7 +364,12 @@ function parseLabeledImages(wb){
   }));
 }
 
-async function exportXlsx(dialogues){
+function exportFileName(batchName){
+  const safe=String(batchName||"annotation_export").replace(/[\\/:*?"<>|]/g,"_").trim()||"annotation_export";
+  return safe+"_annotation_export.xlsx";
+}
+
+async function exportXlsx(dialogues,fileName="annotation_export.xlsx"){
   const XLSX=await import("xlsx");const wb=XLSX.utils.book_new();
   for(const dlg of dialogues){
     const h2=["ID сессии","№","Диалоговая пара","Доска","Скриншот"].concat(CRITERIA_ORDER);
@@ -377,7 +382,7 @@ async function exportXlsx(dialogues){
     const ws=XLSX.utils.aoa_to_sheet(rows);
     XLSX.utils.book_append_sheet(wb,ws,dlg.title.substring(0,31));
   }
-  XLSX.writeFile(wb,"annotation_export.xlsx");
+  XLSX.writeFile(wb,fileName);
 }
 
 /* ═══ DIFF SUMMARY ═══ */
@@ -547,11 +552,25 @@ export default function Home(){
     else myDlgs=myDlgs.filter(d=>d.assignedTo===filterUser);
   }
   const sel=dialogues.find(d=>d.id===selId);
+  const batchKey=d=>d.batchId||"__legacy";
+  const groupedDialogues=Object.values(myDlgs.reduce((groups,dlg)=>{
+    const key=batchKey(dlg);
+    if(!groups[key])groups[key]={key,name:dlg.batchName||"Старые загрузки",createdAt:dlg.batchCreatedAt||0,dialogues:[]};
+    groups[key].dialogues.push(dlg);
+    return groups;
+  },{})).sort((a,b)=>b.createdAt-a.createdAt);
+  const allBatchDialogues=key=>dialogues.filter(d=>batchKey(d)===key);
 
   async function handleImport(e){
     const file=e.target.files[0];if(!file)return;
     const parsed=await parseXlsx(file);
-    for(const dlg of parsed){set(ref(db,"ann_dialogues/"+dlg.id),dlg);}
+    const batchId="batch_"+Date.now()+"_"+Math.random().toString(36).slice(2,8);
+    const batchName=file.name.replace(/\.(xlsx|xls)$/i,"")||"Новая корзинка";
+    const batchCreatedAt=Date.now();
+    await Promise.all(parsed.map(dlg=>{
+      const id=batchId+"_"+dlg.id;
+      return set(ref(db,"ann_dialogues/"+id),{...dlg,id,batchId,batchName,batchCreatedAt});
+    }));
     e.target.value="";
   }
   function assignDlg(id,email){
@@ -580,7 +599,7 @@ export default function Home(){
           {mode==="manager"&&<label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:C.m,cursor:"pointer"}}><input type="checkbox" checked={showDiff} onChange={e=>setShowDiff(e.target.checked)}/>⚡ Diff с auto</label>}
           {mode==="manager"&&<><Btn onClick={()=>fileRef.current?.click()} color={C.g} bg={C.gs}>+ Импорт</Btn><input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleImport} style={{display:"none"}}/>
           <Btn onClick={()=>setShowUsers(true)} color={C.bl} bg={C.bls}>👥</Btn>
-          {dialogues.length>0&&<Btn onClick={()=>exportXlsx(dialogues)} color={C.a} bg={C.as}>↓ Экспорт</Btn>}</>}
+          {dialogues.length>0&&<Btn onClick={()=>exportXlsx(dialogues)} color={C.a} bg={C.as}>↓ Экспорт всего</Btn>}</>}
           <Btn onClick={()=>setUser(null)} color={C.r} bg={C.rs}>Выйти</Btn>
         </div>
       </div>
@@ -599,35 +618,54 @@ export default function Home(){
 
         {myDlgs.length===0?
           <div style={{textAlign:"center",padding:"80px 20px",color:C.d}}><div style={{fontSize:40,marginBottom:12,opacity:.3}}>◇</div><div style={{fontSize:14}}>{mode==="manager"?"Импортируй диалоги":"Нет назначенных диалогов"}</div></div>:
-          <div style={{display:"flex",flexDirection:"column",gap:4}}>
-            {myDlgs.map(dlg=>{
-              const tc=CRITERIA_ORDER.length*(dlg.pairs||[]).length;
-              const dc=CRITERIA_ORDER.reduce((s,c)=>{const ann=(dlg.annotations||{})[c]||{};return s+(dlg.pairs||[]).filter(p=>ann[String(p.num)]!==undefined&&ann[String(p.num)]!=="").length;},0);
-              const hasAuto=Object.keys(dlg.autoScores||{}).length>0;
-
-              return<div key={dlg.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",background:C.s,border:"1px solid "+C.b,borderRadius:8,cursor:"pointer"}} onClick={()=>setSelId(dlg.id)}>
-                <div style={{flex:1}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                    <span style={{fontSize:13,fontWeight:600}}>{dlg.title}</span>
-                    <Badge status={dlg.status}/>
-                    {dlg.assignedTo&&<span style={{fontSize:10,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.m}}>{userName(dlg.assignedTo)}</span>}
-                    {hasAuto&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.d}}>🤖 auto</span>}
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            {groupedDialogues.map(group=>{
+              const fullBatch=allBatchDialogues(group.key);
+              const doneCount=fullBatch.filter(d=>d.status==="done").length;
+              const hiddenCount=fullBatch.length-group.dialogues.length;
+              return<div key={group.key} style={{border:"1px solid "+C.b,borderRadius:12,overflow:"hidden",background:C.s2}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",borderBottom:"1px solid "+C.b,background:C.s3}}>
+                  <div>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:14,fontWeight:700,color:C.t}}>▣ {group.name}</span>
+                      <span style={{fontSize:10,color:C.m}}>{fullBatch.length} диалогов</span>
+                      <span style={{fontSize:10,color:doneCount===fullBatch.length?C.g:C.d}}>готово {doneCount}/{fullBatch.length}</span>
+                    </div>
+                    {hiddenCount>0&&<div style={{fontSize:9,color:C.d,marginTop:3}}>По текущему фильтру показано {group.dialogues.length} из {fullBatch.length}</div>}
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <span style={{fontSize:10,color:C.d}}>{(dlg.pairs||[]).length} пар</span>
-                    <div style={{width:100}}><Progress done={dc} total={tc}/></div>
-                    {hasAuto&&showDiff&&<DiffSummary dialogue={dlg}/>}
-                  </div>
+                  {mode==="manager"&&<Btn onClick={()=>exportXlsx(fullBatch,exportFileName(group.name))} color={C.a} bg={C.as}>↓ Скачать корзинку</Btn>}
                 </div>
-                <div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
-                  {mode==="manager"&&
-                    <select onChange={e=>{if(e.target.value)assignDlg(dlg.id,e.target.value);}} value={dlg.assignedTo||""} style={{padding:"4px 8px",borderRadius:5,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:11}}>
-                      <option value="">Не назначен</option>
-                      {users.filter(u=>u.role==="editor").map(u=><option key={u.email} value={u.email}>{u.name}</option>)}
-                    </select>}
-                  {mode==="editor"&&dlg.status==="unassigned"&&<Btn onClick={()=>assignDlg(dlg.id,user.email)} color={C.g} bg={C.gs}>Забрать →</Btn>}
-                  <Btn onClick={()=>setSelId(dlg.id)} color={C.a}>Открыть →</Btn>
-                  {mode==="manager"&&<Btn onClick={()=>{if(confirm("Удалить «"+dlg.title+"»?"))remove(ref(db,"ann_dialogues/"+dlg.id));}} color={C.r} bg={C.rs}>🗑</Btn>}
+                <div style={{display:"flex",flexDirection:"column",gap:4,padding:8}}>
+                  {group.dialogues.map(dlg=>{
+                    const tc=CRITERIA_ORDER.length*(dlg.pairs||[]).length;
+                    const dc=CRITERIA_ORDER.reduce((s,c)=>{const ann=(dlg.annotations||{})[c]||{};return s+(dlg.pairs||[]).filter(p=>ann[String(p.num)]!==undefined&&ann[String(p.num)]!=="").length;},0);
+                    const hasAuto=Object.keys(dlg.autoScores||{}).length>0;
+
+                    return<div key={dlg.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",background:C.s,border:"1px solid "+C.b,borderRadius:8,cursor:"pointer"}} onClick={()=>setSelId(dlg.id)}>
+                      <div style={{flex:1}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                          <span style={{fontSize:13,fontWeight:600}}>{dlg.title}</span>
+                          <Badge status={dlg.status}/>
+                          {dlg.assignedTo&&<span style={{fontSize:10,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.m}}>{userName(dlg.assignedTo)}</span>}
+                          {hasAuto&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.d}}>🤖 auto</span>}
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{fontSize:10,color:C.d}}>{(dlg.pairs||[]).length} пар</span>
+                          <div style={{width:100}}><Progress done={dc} total={tc}/></div>
+                          {hasAuto&&showDiff&&<DiffSummary dialogue={dlg}/>} 
+                        </div>
+                      </div>
+                      <div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
+                        {mode==="manager"&&
+                          <select onChange={e=>{if(e.target.value)assignDlg(dlg.id,e.target.value);}} value={dlg.assignedTo||""} style={{padding:"4px 8px",borderRadius:5,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:11}}>
+                            <option value="">Не назначен</option>
+                            {users.filter(u=>u.role==="editor").map(u=><option key={u.email} value={u.email}>{u.name}</option>)}
+                          </select>}
+                        {mode==="editor"&&dlg.status==="unassigned"&&<Btn onClick={()=>assignDlg(dlg.id,user.email)} color={C.g} bg={C.gs}>Забрать →</Btn>}
+                        <Btn onClick={()=>setSelId(dlg.id)} color={C.a}>Открыть →</Btn>
+                        {mode==="manager"&&<Btn onClick={()=>{if(confirm("Удалить «"+dlg.title+"»?"))remove(ref(db,"ann_dialogues/"+dlg.id));}} color={C.r} bg={C.rs}>🗑</Btn>}
+                      </div>
+                    </div>;})}
                 </div>
               </div>;})}
           </div>}
