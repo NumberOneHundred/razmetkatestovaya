@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { db, ref, set, onValue, remove } from "../lib/firebase";
+import { db, ref, set, onValue, update, remove } from "../lib/firebase";
 import { CRITERIA, CRITERIA_ORDER, GROUP_COLORS } from "../lib/criteria";
 import { parseBoardOps, renderBoardSvg } from "../lib/board";
 import { extractImages } from "../lib/images";
@@ -364,6 +364,79 @@ function parseLabeledImages(wb){
   }));
 }
 
+
+function normalizeDialogueText(value){
+  return String(value||"")
+    .replace(/_x([0-9a-fA-F]{4})_/g,(_,hex)=>String.fromCharCode(parseInt(hex,16)))
+    .replace(/\r\n?/g,"\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g,"")
+    .replace(/[ \t]+/g," ")
+    .replace(/ *\n */g,"\n")
+    .trim();
+}
+
+function normalizeDialogueTitle(value){
+  return String(value||"")
+    .replace(/(?:[_\s-]+auto(?:оценка)?)$/i,"")
+    .trim()
+    .toLowerCase();
+}
+
+async function parseAutoScoresXlsx(file){
+  const XLSX=await import("xlsx");
+  const buf=await file.arrayBuffer();
+  const wb=XLSX.read(buf,{type:"array"});
+  const sheets=[];
+
+  for(const name of wb.SheetNames){
+    const lower=name.toLowerCase();
+    if(lower==="сводка"||lower==="empty"||lower==="sheet1"||lower.includes("критери"))continue;
+    const data=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1});
+    if(data.length<2)continue;
+
+    let headerRow=-1,textCol=-1,numCol=-1,criterionCols=[];
+    for(let r=0;r<Math.min(data.length,10);r++){
+      const row=data[r]||[];
+      const currentCriteria=[];
+      let currentText=-1,currentNum=-1;
+      row.forEach((h,c)=>{
+        const raw=String(h||"").trim();
+        const hl=raw.toLowerCase();
+        if(currentText===-1&&(hl.includes("диалоговая")||hl.includes("реплика")||hl.includes("текст пары")))currentText=c;
+        if(currentNum===-1&&(hl==="№"||hl==="pair_id"||hl==="num_replic"))currentNum=c;
+        if(CRITERIA_ORDER.includes(raw))currentCriteria.push([c,raw]);
+      });
+      if(currentText!==-1&&currentCriteria.length>0){
+        headerRow=r;textCol=currentText;numCol=currentNum;criterionCols=currentCriteria;break;
+      }
+    }
+    if(headerRow===-1)continue;
+
+    const rows=[];
+    for(let r=headerRow+1;r<data.length;r++){
+      const row=data[r]||[];
+      const text=String(row[textCol]||"");
+      if(!text.trim())continue;
+      const scores={};
+      for(const [c,code] of criterionCols){
+        const val=row[c];
+        if(val!==undefined&&val!==null&&val!=="")scores[code]=String(val);
+      }
+      rows.push({sourcePairNum:numCol===-1?String(r-headerRow):String(row[numCol]||r-headerRow),text,scores});
+    }
+    if(rows.length>0)sheets.push({title:name,rows});
+  }
+  return sheets;
+}
+
+function formatUploadDate(value){
+  const ts=Number(value);
+  if(!ts)return "дата загрузки не сохранена";
+  return new Intl.DateTimeFormat("ru-RU",{
+    day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"
+  }).format(new Date(ts));
+}
+
 function exportFileName(batchName){
   const safe=String(batchName||"annotation_export").replace(/[\\/:*?"<>|]/g,"_").trim()||"annotation_export";
   return safe+"_annotation_export.xlsx";
@@ -535,6 +608,8 @@ export default function Home(){
   const[showDiff,setShowDiff]=useState(true);
   const[filterUser,setFilterUser]=useState("all");
   const fileRef=useRef(null);
+  const autoFileRef=useRef(null);
+  const autoTargetBatchRef=useRef(null);
 
   useEffect(()=>{
     const u1=onValue(ref(db,"ann_users"),snap=>{if(snap.val())setUsers(Object.values(snap.val()));else setUsers([]);});
@@ -573,6 +648,81 @@ export default function Home(){
     }));
     e.target.value="";
   }
+
+  function openAutoImport(batchKey){
+    autoTargetBatchRef.current=batchKey;
+    autoFileRef.current?.click();
+  }
+
+  async function handleAutoImport(e){
+    const file=e.target.files[0];if(!file)return;
+    const batchKeyToUpdate=autoTargetBatchRef.current;
+    const targetDialogues=batchKeyToUpdate?allBatchDialogues(batchKeyToUpdate):dialogues;
+
+    try{
+      const autoSheets=await parseAutoScoresXlsx(file);
+      const rootUpdates={};
+      const importedAt=Date.now();
+      let matchedDialogues=0,matchedPairs=0,unmatchedPairs=0;
+      const unmatchedSheets=[],ambiguousSheets=[],partialSheets=[];
+
+      for(const autoSheet of autoSheets){
+        const title=normalizeDialogueTitle(autoSheet.title);
+        const candidates=targetDialogues.filter(d=>normalizeDialogueTitle(d.title)===title);
+        if(candidates.length===0){unmatchedSheets.push(autoSheet.title);continue;}
+
+        const ranked=candidates.map(dlg=>{
+          const pairByText=new Map((dlg.pairs||[]).map(pair=>[normalizeDialogueText(pair.text),pair]));
+          const matches=autoSheet.rows.filter(row=>pairByText.has(normalizeDialogueText(row.text))).length;
+          return{dlg,pairByText,matches};
+        }).sort((a,b)=>b.matches-a.matches);
+
+        const best=ranked[0];
+        if(!best||best.matches===0){unmatchedSheets.push(autoSheet.title);continue;}
+        if(ranked[1]&&ranked[1].matches===best.matches){ambiguousSheets.push(autoSheet.title);continue;}
+
+        const minimumMatches=Math.max(1,Math.ceil(autoSheet.rows.length*.8));
+        if(best.matches<minimumMatches){unmatchedSheets.push(autoSheet.title);continue;}
+
+        const autoScores={};
+        let sheetMatched=0,sheetUnmatched=0;
+        for(const row of autoSheet.rows){
+          const pair=best.pairByText.get(normalizeDialogueText(row.text));
+          if(!pair){sheetUnmatched++;continue;}
+          sheetMatched++;
+          for(const [code,val] of Object.entries(row.scores)){
+            if(!autoScores[code])autoScores[code]={};
+            autoScores[code][String(pair.num)]=String(val);
+          }
+        }
+
+        rootUpdates["ann_dialogues/"+best.dlg.id+"/autoScores"]=autoScores;
+        rootUpdates["ann_dialogues/"+best.dlg.id+"/autoImportedAt"]=importedAt;
+        rootUpdates["ann_dialogues/"+best.dlg.id+"/autoSourceName"]=file.name;
+        matchedDialogues++;
+        matchedPairs+=sheetMatched;
+        unmatchedPairs+=sheetUnmatched;
+        if(sheetUnmatched>0)partialSheets.push(autoSheet.title);
+      }
+
+      if(matchedDialogues>0)await update(ref(db),rootUpdates);
+
+      const report=[
+        "Автооценка загружена: "+matchedDialogues+" диалогов, "+matchedPairs+" пар.",
+        unmatchedPairs>0?"Не удалось привязать пар: "+unmatchedPairs+".":"",
+        partialSheets.length>0?"Частично совпали: "+partialSheets.join(", ")+".":"",
+        unmatchedSheets.length>0?"Не найдены: "+unmatchedSheets.join(", ")+".":"",
+        ambiguousSheets.length>0?"Есть несколько одинаковых кандидатов, пропущены: "+ambiguousSheets.join(", ")+".":""
+      ].filter(Boolean).join("\n");
+      alert(report||"В файле не найдено листов с автооценкой.");
+    }catch(err){
+      console.error("Auto import failed:",err);
+      alert("Не получилось загрузить автооценку. Проверь формат файла и попробуй ещё раз.");
+    }finally{
+      e.target.value="";
+      autoTargetBatchRef.current=null;
+    }
+  }
   function assignDlg(id,email){
     set(ref(db,"ann_dialogues/"+id+"/assignedTo"),email);
     set(ref(db,"ann_dialogues/"+id+"/status"),"annotating");
@@ -598,6 +748,7 @@ export default function Home(){
         <div style={{display:"flex",gap:6,alignItems:"center"}}>
           {mode==="manager"&&<label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:C.m,cursor:"pointer"}}><input type="checkbox" checked={showDiff} onChange={e=>setShowDiff(e.target.checked)}/>⚡ Diff с auto</label>}
           {mode==="manager"&&<><Btn onClick={()=>fileRef.current?.click()} color={C.g} bg={C.gs}>+ Импорт</Btn><input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleImport} style={{display:"none"}}/>
+          <input ref={autoFileRef} type="file" accept=".xlsx,.xls" onChange={handleAutoImport} style={{display:"none"}}/>
           <Btn onClick={()=>setShowUsers(true)} color={C.bl} bg={C.bls}>👥</Btn>
           {dialogues.length>0&&<Btn onClick={()=>exportXlsx(dialogues)} color={C.a} bg={C.as}>↓ Экспорт всего</Btn>}</>}
           <Btn onClick={()=>setUser(null)} color={C.r} bg={C.rs}>Выйти</Btn>
@@ -631,9 +782,13 @@ export default function Home(){
                       <span style={{fontSize:10,color:C.m}}>{fullBatch.length} диалогов</span>
                       <span style={{fontSize:10,color:doneCount===fullBatch.length?C.g:C.d}}>готово {doneCount}/{fullBatch.length}</span>
                     </div>
+                    <div style={{fontSize:9,color:group.createdAt?C.m:C.d,marginTop:3}}>Загружено: {formatUploadDate(group.createdAt)}</div>
                     {hiddenCount>0&&<div style={{fontSize:9,color:C.d,marginTop:3}}>По текущему фильтру показано {group.dialogues.length} из {fullBatch.length}</div>}
                   </div>
-                  {mode==="manager"&&<Btn onClick={()=>exportXlsx(fullBatch,exportFileName(group.name))} color={C.a} bg={C.as}>↓ Скачать корзинку</Btn>}
+                  {mode==="manager"&&<div style={{display:"flex",gap:6}}>
+                    <Btn onClick={()=>openAutoImport(group.key)} color={C.y} bg={C.ys}>🤖 Загрузить auto</Btn>
+                    <Btn onClick={()=>exportXlsx(fullBatch,exportFileName(group.name))} color={C.a} bg={C.as}>↓ Скачать корзинку</Btn>
+                  </div>}
                 </div>
                 <div style={{display:"flex",flexDirection:"column",gap:4,padding:8}}>
                   {group.dialogues.map(dlg=>{
@@ -651,6 +806,7 @@ export default function Home(){
                         </div>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{fontSize:10,color:C.d}}>{(dlg.pairs||[]).length} пар</span>
+                          <span style={{fontSize:10,color:dlg.batchCreatedAt?C.m:C.d}}>загружено {formatUploadDate(dlg.batchCreatedAt)}</span>
                           <div style={{width:100}}><Progress done={dc} total={tc}/></div>
                           {hasAuto&&showDiff&&<DiffSummary dialogue={dlg}/>} 
                         </div>
