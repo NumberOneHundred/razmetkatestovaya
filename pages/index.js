@@ -14,6 +14,9 @@ const C = {
   tu:"#4A9EFF",st:"#F0883E",y:"#E3B341",ys:"rgba(227,179,65,.12)",
 };
 const STS={unassigned:{l:"Не назначен",c:C.d},annotating:{l:"Разметка",c:C.o},review:{l:"На ревью",c:C.bl},done:{l:"Готово",c:C.g}};
+const ROLES={editor:{label:"Разметчик",icon:"✏️"},reviewer:{label:"Ревьюер",icon:"⚡"},manager:{label:"Менеджер",icon:"📊"}};
+function roleLabel(role){return ROLES[role]?.label||role||"Разметчик";}
+function roleIcon(role){return ROLES[role]?.icon||"👁";}
 function ek(e){return e.replace(/[.#$/[\]@]/g,"_");}
 
 function Btn({children,onClick,color,bg,disabled,style}){return<button onClick={onClick} disabled={disabled} style={{padding:"6px 14px",borderRadius:6,border:"1px solid "+(color||C.b),background:bg||"transparent",color:color||C.m,fontSize:11,fontWeight:600,cursor:disabled?"default":"pointer",opacity:disabled?.5:1,...style}}>{children}</button>;}
@@ -120,13 +123,17 @@ function LoginScreen({users,onLogin}){
     </div></div>;
 }
 
-function UsersModal({users,onAdd,onRemove,onClose}){
+function UsersModal({users,onAdd,onRemove,onRoleChange,onClose}){
   const[email,setEmail]=useState("");const[name,setName]=useState("");const[role,setRole]=useState("editor");
   return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={onClose}>
-    <div onClick={e=>e.stopPropagation()} style={{background:C.s,border:"1px solid "+C.b,borderRadius:14,padding:24,width:480,maxHeight:"80vh",overflow:"auto"}}>
-      <h2 style={{fontSize:16,fontWeight:700,marginBottom:16,color:C.t}}>👥 Сотрудники</h2>
-      {users.map(u=><div key={u.email} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 12px",background:C.bg,border:"1px solid "+C.b,borderRadius:7,marginBottom:4}}>
-        <div><div style={{fontSize:12,fontWeight:600,color:C.t}}>{u.name}</div><div style={{fontSize:10,color:C.d}}>{u.email} • {u.role}</div></div>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.s,border:"1px solid "+C.b,borderRadius:14,padding:24,width:560,maxHeight:"80vh",overflow:"auto"}}>
+      <h2 style={{fontSize:16,fontWeight:700,marginBottom:6,color:C.t}}>👥 Сотрудники</h2>
+      <div style={{fontSize:10,color:C.d,marginBottom:16}}>Ревьюер видит все диалоги и Diff с auto, но не получает менеджерские действия.</div>
+      {users.map(u=><div key={u.email} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"8px 12px",background:C.bg,border:"1px solid "+C.b,borderRadius:7,marginBottom:4}}>
+        <div style={{minWidth:0,flex:1}}><div style={{fontSize:12,fontWeight:600,color:C.t}}>{u.name}</div><div style={{fontSize:10,color:C.d,overflow:"hidden",textOverflow:"ellipsis"}}>{u.email}</div></div>
+        <select value={u.role||"editor"} onChange={e=>onRoleChange(u.email,e.target.value)} style={{padding:"5px 8px",borderRadius:5,border:"1px solid "+C.b,background:C.s,color:C.t,fontSize:11}}>
+          {Object.entries(ROLES).map(([value,meta])=><option key={value} value={value}>{meta.icon} {meta.label}</option>)}
+        </select>
         <Btn onClick={()=>onRemove(u.email)} color={C.r} bg={C.rs}>Удалить</Btn>
       </div>)}
       <div style={{borderTop:"1px solid "+C.b,paddingTop:16,marginTop:12}}>
@@ -135,9 +142,9 @@ function UsersModal({users,onAdd,onRemove,onClose}){
           <input value={name} onChange={e=>setName(e.target.value)} placeholder="Имя" style={{flex:1,padding:"7px 10px",borderRadius:6,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:12}}/>
         </div>
         <div style={{display:"flex",gap:6,marginBottom:10}}>
-          {["editor","manager"].map(r=><Btn key={r} onClick={()=>setRole(r)} color={role===r?C.a:C.m} bg={role===r?C.as:"transparent"}>{r==="editor"?"✏️ Разметчик":"📊 Менеджер"}</Btn>)}
+          {Object.entries(ROLES).map(([value,meta])=><Btn key={value} onClick={()=>setRole(value)} color={role===value?C.a:C.m} bg={role===value?C.as:"transparent"}>{meta.icon} {meta.label}</Btn>)}
         </div>
-        <Btn onClick={()=>{if(email.trim()&&name.trim()){onAdd({email:email.trim(),name:name.trim(),role});setEmail("");setName("");}}} color={C.g} bg={C.gs}>+ Добавить</Btn>
+        <Btn onClick={()=>{if(email.trim()&&name.trim()){onAdd({email:email.trim(),name:name.trim(),role});setEmail("");setName("");setRole("editor");}}} color={C.g} bg={C.gs}>+ Добавить</Btn>
       </div>
     </div></div>;
 }
@@ -484,9 +491,10 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
   const[crIdx,setCrIdx]=useState(0);
   const[annotations,setAnnotations]=useState(dialogue.annotations||{});
   const[comments,setComments]=useState(dialogue.comments||{});
+  const[reviewedCriteria,setReviewedCriteria]=useState(dialogue.reviewedCriteria||{});
   const code=CRITERIA_ORDER[crIdx];
   const pairs=dialogue.pairs||[];
-  const autoScores=dialogue.autoScores||{};
+  const autoScores=showDiff?(dialogue.autoScores||{}):{};
   const autoForCriterion=autoScores[code]||{};
 
   const totalCells=CRITERIA_ORDER.length*pairs.length;
@@ -495,8 +503,19 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
   const curDone=pairs.filter(p=>curScores[String(p.num)]!==undefined&&curScores[String(p.num)]!=="").length;
   const curDiffs=pairs.filter(p=>{const a=autoForCriterion[String(p.num)],m=curScores[String(p.num)];return a!==undefined&&a!==""&&m!==undefined&&m!==""&&String(a)!==String(m);}).length;
   const curComments=comments[code]||{};
+  const isReviewer=user.role==="manager"||user.role==="reviewer";
+  const currentCriterionReviewed=!!reviewedCriteria[code];
+  const reviewedCount=CRITERIA_ORDER.filter(c=>!!reviewedCriteria[c]).length;
+  const allCriteriaReviewed=reviewedCount===CRITERIA_ORDER.length;
+
+  function invalidateCriterionReview(criterionCode){
+    if(!reviewedCriteria[criterionCode])return;
+    const next={...reviewedCriteria};delete next[criterionCode];setReviewedCriteria(next);
+    remove(ref(db,"ann_dialogues/"+dialogue.id+"/reviewedCriteria/"+criterionCode));
+  }
 
   function setScore(pairNum,val){
+    invalidateCriterionReview(code);
     const newAnn={...annotations};if(!newAnn[code])newAnn[code]={};
     newAnn[code][String(pairNum)]=val;setAnnotations(newAnn);
     set(ref(db,"ann_dialogues/"+dialogue.id+"/annotations/"+code+"/"+String(pairNum)),val);
@@ -507,15 +526,49 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
     set(ref(db,"ann_dialogues/"+dialogue.id+"/comments/"+code+"/"+String(pairNum)),txt);
   }
   function fillAll(val){
+    invalidateCriterionReview(code);
     const newAnn={...annotations};if(!newAnn[code])newAnn[code]={};
     pairs.forEach(p=>{newAnn[code][String(p.num)]=val;});
     setAnnotations(newAnn);
     pairs.forEach(p=>{set(ref(db,"ann_dialogues/"+dialogue.id+"/annotations/"+code+"/"+String(p.num)),val);});
   }
-  function handleFinish(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"review");onBack();}
-  function handleApprove(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"done");onBack();}
-  function handleReject(){set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"annotating");onBack();}
-  const isReviewer=user.role==="manager";
+  function toggleCriterionReviewed(){
+    if(!isReviewer)return;
+    if(currentCriterionReviewed){
+      const next={...reviewedCriteria};delete next[code];setReviewedCriteria(next);
+      remove(ref(db,"ann_dialogues/"+dialogue.id+"/reviewedCriteria/"+code));
+      return;
+    }
+    if(curDone<pairs.length){
+      alert("Сначала оцени все реплики по критерию "+code+".");
+      return;
+    }
+    const reviewInfo={by:user.email,at:Date.now()};
+    setReviewedCriteria({...reviewedCriteria,[code]:reviewInfo});
+    set(ref(db,"ann_dialogues/"+dialogue.id+"/reviewedCriteria/"+code),reviewInfo);
+  }
+  function handleFinish(){
+    update(ref(db),{
+      ["ann_dialogues/"+dialogue.id+"/status"]:"review",
+      ["ann_dialogues/"+dialogue.id+"/reviewedCriteria"]:null
+    });
+    onBack();
+  }
+  function handleApprove(){
+    if(!allCriteriaReviewed){
+      alert("Сначала прими все критерии: сейчас проверено "+reviewedCount+" из "+CRITERIA_ORDER.length+".");
+      return;
+    }
+    set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"done");onBack();
+  }
+  function handleReject(){
+    setReviewedCriteria({});
+    update(ref(db),{
+      ["ann_dialogues/"+dialogue.id+"/status"]:"annotating",
+      ["ann_dialogues/"+dialogue.id+"/reviewedCriteria"]:null
+    });
+    onBack();
+  }
 
   return<div style={{minHeight:"100vh",background:C.bg}}>
     {/* Header */}
@@ -538,7 +591,8 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
           const cr2=CRITERIA[c];const gc=GROUP_COLORS[cr2?.group]||C.a;const active=i===crIdx;
           const ann=annotations[c]||{};const filled=pairs.filter(p=>ann[String(p.num)]!==undefined&&ann[String(p.num)]!=="").length;const complete=filled===pairs.length;
           const asc=autoScores[c]||{};const hasDiff=pairs.some(p=>{const av=asc[String(p.num)],mv=(annotations[c]||{})[String(p.num)];return av!==undefined&&av!==""&&mv!==undefined&&mv!==""&&String(av)!==String(mv);});
-          return<button key={c} onClick={()=>{setCrIdx(i);window.scrollTo(0,0);}} style={{padding:"3px 7px",borderRadius:4,border:"1px solid "+(active?gc:complete?C.g+"40":hasDiff?C.y+"40":C.b),background:active?gc+"20":complete?C.g+"10":hasDiff?C.y+"08":"transparent",color:active?gc:complete?C.g:hasDiff?C.y:C.d,fontSize:9,fontWeight:600,cursor:"pointer"}}>{c}{hasDiff?"⚡":""}</button>;
+          const reviewed=isReviewer&&!!reviewedCriteria[c];
+          return<button key={c} onClick={()=>{setCrIdx(i);window.scrollTo(0,0);}} style={{padding:"3px 7px",borderRadius:4,border:"1px solid "+(active?gc:reviewed?C.g+"60":complete?C.g+"40":hasDiff?C.y+"40":C.b),background:active?gc+"20":reviewed?C.g+"16":complete?C.g+"10":hasDiff?C.y+"08":"transparent",color:active?gc:reviewed?C.g:complete?C.g:hasDiff?C.y:C.d,fontSize:9,fontWeight:600,cursor:"pointer"}}>{c}{reviewed?"✓":hasDiff?"⚡":""}</button>;
         })}
       </div>
     </div>
@@ -568,6 +622,12 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
           <div style={{display:"flex",alignItems:"center",justifyContent:"center",marginBottom:12}}>
             <span style={{fontSize:13,fontWeight:600,color:curDone===pairs.length?C.g:C.o}}>{curDone===pairs.length?"✓ Все реплики отмечены":"⚠ Отмечено "+curDone+" из "+pairs.length}</span>
           </div>
+          {isReviewer&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:12}}>
+            <Btn onClick={toggleCriterionReviewed} disabled={!currentCriterionReviewed&&curDone<pairs.length} color={currentCriterionReviewed?C.g:C.bl} bg={currentCriterionReviewed?C.gs:C.bls}>
+              {currentCriterionReviewed?"✓ Критерий принят":"Принять критерий"}
+            </Btn>
+            <span style={{fontSize:10,color:C.d}}>Проверено {reviewedCount} из {CRITERIA_ORDER.length}</span>
+          </div>}
           <div style={{display:"flex",justifyContent:"space-between"}}>
             <Btn onClick={()=>{setCrIdx(Math.max(0,crIdx-1));window.scrollTo(0,0);}} disabled={crIdx===0} color={C.m}>← Пред.</Btn>
             <span style={{fontSize:12,color:C.d}}>{crIdx+1} / {CRITERIA_ORDER.length}</span>
@@ -575,7 +635,7 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
               <Btn onClick={()=>{setCrIdx(crIdx+1);window.scrollTo(0,0);}} color={C.a} bg={C.as}>След. →</Btn>:
               isReviewer?
                 <div style={{display:"flex",gap:6}}>
-                  <Btn onClick={handleApprove} color={C.g} bg={C.gs}>✓ Принять</Btn>
+                  <Btn onClick={handleApprove} disabled={!allCriteriaReviewed} color={C.g} bg={C.gs}>✓ Принять диалог</Btn>
                   <Btn onClick={handleReject} color={C.r} bg={C.rs}>✕ На доработку</Btn>
                 </div>:
                 <Btn onClick={handleFinish} color={C.g} bg={C.gs}>✓ Завершить</Btn>}
@@ -586,11 +646,17 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
       {/* Right: sticky criterion panel */}
       <div style={{width:320,flexShrink:0,position:"sticky",top:90,alignSelf:"flex-start",maxHeight:"calc(100vh - 100px)",overflowY:"auto"}}>
         <CriterionPanel code={code} expanded={true} onToggle={()=>{}}/>
+        {isReviewer&&<div style={{padding:"10px 12px",marginBottom:8,border:"1px solid "+(currentCriterionReviewed?C.g+"40":C.b),borderRadius:8,background:currentCriterionReviewed?C.gs:C.s}}>
+          <Btn onClick={toggleCriterionReviewed} disabled={!currentCriterionReviewed&&curDone<pairs.length} color={currentCriterionReviewed?C.g:C.bl} bg={currentCriterionReviewed?C.gs:C.bls} style={{width:"100%"}}>
+            {currentCriterionReviewed?"✓ Критерий принят":"Принять критерий"}
+          </Btn>
+          <div style={{fontSize:9,color:C.d,textAlign:"center",marginTop:6}}>Проверено {reviewedCount} из {CRITERIA_ORDER.length}</div>
+        </div>}
         <div style={{display:"flex",gap:6,marginTop:8}}>
           <Btn onClick={()=>{setCrIdx(Math.max(0,crIdx-1));window.scrollTo(0,0);}} disabled={crIdx===0} color={C.m} style={{flex:1}}>← Пред.</Btn>
           {crIdx<CRITERIA_ORDER.length-1?
             <Btn onClick={()=>{setCrIdx(crIdx+1);window.scrollTo(0,0);}} color={C.a} bg={C.as} style={{flex:1}}>След. →</Btn>:
-            <Btn onClick={isReviewer?handleApprove:handleFinish} color={C.g} bg={C.gs} style={{flex:1}}>✓ {isReviewer?"Принять":"Завершить"}</Btn>}
+            <Btn onClick={isReviewer?handleApprove:handleFinish} disabled={isReviewer&&!allCriteriaReviewed} color={C.g} bg={C.gs} style={{flex:1}}>✓ {isReviewer?"Принять диалог":"Завершить"}</Btn>}
         </div>
       </div>
     </div>
@@ -617,7 +683,15 @@ export default function Home(){
     return()=>{u1();u2();};
   },[]);
 
+  useEffect(()=>{
+    if(!user)return;
+    const fresh=users.find(u=>u.email===user.email);
+    if(fresh&&fresh.role!==user.role)setUser(fresh);
+  },[users,user]);
+
   const mode=user?.role||"editor";
+  const canViewAuto=mode==="manager"||mode==="reviewer";
+  const isManager=mode==="manager";
   const editors=useMemo(()=>[...new Set(dialogues.map(d=>d.assignedTo).filter(Boolean))],[dialogues]);
   const userName=(email)=>{const u=users.find(u=>u.email===email);return u?u.name:email?email.split("@")[0]:"";};
   const editorCounts=useMemo(()=>{const c={};dialogues.forEach(d=>{if(d.assignedTo){c[d.assignedTo]=(c[d.assignedTo]||0)+1;}});return c;},[dialogues]);
@@ -729,7 +803,7 @@ export default function Home(){
   }
 
   if(user&&sel){
-    const sd=showDiff&&mode==="manager"&&Object.keys(sel.autoScores||{}).length>0;
+    const sd=showDiff&&canViewAuto&&Object.keys(sel.autoScores||{}).length>0;
     return<><Head><title>Annotation — {sel.title}</title></Head>
       <AnnotatorScreen dialogue={sel} user={user} onBack={()=>setSelId(null)} showDiff={sd}/></>;
   }
@@ -738,16 +812,16 @@ export default function Home(){
 
   return<><Head><title>Annotation Tool — {user.name}</title></Head>
     <div style={{minHeight:"100vh",background:C.bg,color:C.t}}>
-      {showUsers&&<UsersModal users={users} onAdd={u=>set(ref(db,"ann_users/"+ek(u.email)),u)} onRemove={e=>remove(ref(db,"ann_users/"+ek(e)))} onClose={()=>setShowUsers(false)}/>}
+      {showUsers&&<UsersModal users={users} onAdd={u=>set(ref(db,"ann_users/"+ek(u.email)),u)} onRemove={e=>remove(ref(db,"ann_users/"+ek(e)))} onRoleChange={(email,role)=>set(ref(db,"ann_users/"+ek(email)+"/role"),role)} onClose={()=>setShowUsers(false)}/>}
 
       <div style={{borderBottom:"1px solid "+C.b,padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:C.bg+"ee"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <span style={{fontSize:16,fontWeight:800}}><span style={{color:C.a}}>◈</span> Annotation Tool</span>
-          <span style={{fontSize:10,color:C.d,background:C.as,padding:"2px 8px",borderRadius:4}}>{user.name} • {mode==="manager"?"📊":mode==="editor"?"✏️":"👁"}</span>
+          <span style={{fontSize:10,color:C.d,background:C.as,padding:"2px 8px",borderRadius:4}}>{user.name} • {roleIcon(mode)} {roleLabel(mode)}</span>
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center"}}>
-          {mode==="manager"&&<label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:C.m,cursor:"pointer"}}><input type="checkbox" checked={showDiff} onChange={e=>setShowDiff(e.target.checked)}/>⚡ Diff с auto</label>}
-          {mode==="manager"&&<><Btn onClick={()=>fileRef.current?.click()} color={C.g} bg={C.gs}>+ Импорт</Btn><input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleImport} style={{display:"none"}}/>
+          {canViewAuto&&<label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:C.m,cursor:"pointer"}}><input type="checkbox" checked={showDiff} onChange={e=>setShowDiff(e.target.checked)}/>⚡ Diff с auto</label>}
+          {isManager&&<><Btn onClick={()=>fileRef.current?.click()} color={C.g} bg={C.gs}>+ Импорт</Btn><input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleImport} style={{display:"none"}}/>
           <input ref={autoFileRef} type="file" accept=".xlsx,.xls" onChange={handleAutoImport} style={{display:"none"}}/>
           <Btn onClick={()=>setShowUsers(true)} color={C.bl} bg={C.bls}>👥</Btn>
           {dialogues.length>0&&<Btn onClick={()=>exportXlsx(dialogues)} color={C.a} bg={C.as}>↓ Экспорт всего</Btn>}</>}
@@ -802,13 +876,13 @@ export default function Home(){
                           <span style={{fontSize:13,fontWeight:600}}>{dlg.title}</span>
                           <Badge status={dlg.status}/>
                           {dlg.assignedTo&&<span style={{fontSize:10,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.m}}>{userName(dlg.assignedTo)}</span>}
-                          {hasAuto&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.d}}>🤖 auto</span>}
+                          {canViewAuto&&hasAuto&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:C.s3,color:C.d}}>🤖 auto</span>}
                         </div>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{fontSize:10,color:C.d}}>{(dlg.pairs||[]).length} пар</span>
                           <span style={{fontSize:10,color:dlg.batchCreatedAt?C.m:C.d}}>загружено {formatUploadDate(dlg.batchCreatedAt)}</span>
                           <div style={{width:100}}><Progress done={dc} total={tc}/></div>
-                          {hasAuto&&showDiff&&<DiffSummary dialogue={dlg}/>} 
+                          {canViewAuto&&hasAuto&&showDiff&&<DiffSummary dialogue={dlg}/>} 
                         </div>
                       </div>
                       <div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
