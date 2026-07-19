@@ -14,9 +14,14 @@ const C = {
   tu:"#4A9EFF",st:"#F0883E",y:"#E3B341",ys:"rgba(227,179,65,.12)",
 };
 const STS={unassigned:{l:"Не назначен",c:C.d},annotating:{l:"Разметка",c:C.o},review:{l:"На ревью",c:C.bl},done:{l:"Готово",c:C.g}};
-const ROLES={editor:{label:"Разметчик",icon:"✏️"},reviewer:{label:"Ревьюер",icon:"⚡"},manager:{label:"Менеджер",icon:"📊"}};
-function roleLabel(role){return ROLES[role]?.label||role||"Разметчик";}
-function roleIcon(role){return ROLES[role]?.icon||"👁";}
+const ROLES={editor:{label:"Разметчик",icon:"✏️"},manager:{label:"Менеджер",icon:"📊"}};
+function baseRole(user){return user?.role==="manager"?"manager":"editor";}
+function canReview(user){return user?.role==="manager"||user?.role==="reviewer"||user?.canReview===true;}
+function roleLabel(user){
+  if(baseRole(user)==="manager")return ROLES.manager.label;
+  return canReview(user)?"Разметчик · ревью":"Разметчик";
+}
+function roleIcon(user){return baseRole(user)==="manager"?ROLES.manager.icon:canReview(user)?"✏️⚡":ROLES.editor.icon;}
 function ek(e){return e.replace(/[.#$/[\]@]/g,"_");}
 
 function Btn({children,onClick,color,bg,disabled,style}){return<button onClick={onClick} disabled={disabled} style={{padding:"6px 14px",borderRadius:6,border:"1px solid "+(color||C.b),background:bg||"transparent",color:color||C.m,fontSize:11,fontWeight:600,cursor:disabled?"default":"pointer",opacity:disabled?.5:1,...style}}>{children}</button>;}
@@ -123,28 +128,33 @@ function LoginScreen({users,onLogin}){
     </div></div>;
 }
 
-function UsersModal({users,onAdd,onRemove,onRoleChange,onClose}){
-  const[email,setEmail]=useState("");const[name,setName]=useState("");const[role,setRole]=useState("editor");
+function UsersModal({users,onAdd,onRemove,onRoleChange,onReviewChange,onClose}){
+  const[email,setEmail]=useState("");const[name,setName]=useState("");const[role,setRole]=useState("editor");const[allowReview,setAllowReview]=useState(false);
   return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={onClose}>
-    <div onClick={e=>e.stopPropagation()} style={{background:C.s,border:"1px solid "+C.b,borderRadius:14,padding:24,width:560,maxHeight:"80vh",overflow:"auto"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.s,border:"1px solid "+C.b,borderRadius:14,padding:24,width:620,maxHeight:"80vh",overflow:"auto"}}>
       <h2 style={{fontSize:16,fontWeight:700,marginBottom:6,color:C.t}}>👥 Сотрудники</h2>
-      <div style={{fontSize:10,color:C.d,marginBottom:16}}>Ревьюер видит все диалоги и Diff с auto, но не получает менеджерские действия.</div>
-      {users.map(u=><div key={u.email} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"8px 12px",background:C.bg,border:"1px solid "+C.b,borderRadius:7,marginBottom:4}}>
+      <div style={{fontSize:10,color:C.d,marginBottom:16}}>«Может ревьюить» — дополнительное право разметчика: оно открывает отдельный режим со всеми диалогами, auto и Diff.</div>
+      {users.map(u=>{const userRole=baseRole(u);const reviewAccess=canReview(u)&&userRole!=="manager";return <div key={u.email} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"8px 12px",background:C.bg,border:"1px solid "+C.b,borderRadius:7,marginBottom:4}}>
         <div style={{minWidth:0,flex:1}}><div style={{fontSize:12,fontWeight:600,color:C.t}}>{u.name}</div><div style={{fontSize:10,color:C.d,overflow:"hidden",textOverflow:"ellipsis"}}>{u.email}</div></div>
-        <select value={u.role||"editor"} onChange={e=>onRoleChange(u.email,e.target.value)} style={{padding:"5px 8px",borderRadius:5,border:"1px solid "+C.b,background:C.s,color:C.t,fontSize:11}}>
+        <select value={userRole} onChange={e=>onRoleChange(u.email,e.target.value)} style={{padding:"5px 8px",borderRadius:5,border:"1px solid "+C.b,background:C.s,color:C.t,fontSize:11}}>
           {Object.entries(ROLES).map(([value,meta])=><option key={value} value={value}>{meta.icon} {meta.label}</option>)}
         </select>
+        <label style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:userRole==="manager"?C.d:C.m,whiteSpace:"nowrap",cursor:userRole==="manager"?"default":"pointer"}}>
+          <input type="checkbox" checked={reviewAccess} disabled={userRole==="manager"} onChange={e=>onReviewChange(u.email,e.target.checked)}/>
+          ⚡ Может ревьюить
+        </label>
         <Btn onClick={()=>onRemove(u.email)} color={C.r} bg={C.rs}>Удалить</Btn>
-      </div>)}
+      </div>})}
       <div style={{borderTop:"1px solid "+C.b,paddingTop:16,marginTop:12}}>
         <div style={{display:"flex",gap:6,marginBottom:8}}>
           <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="email" style={{flex:2,padding:"7px 10px",borderRadius:6,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:12}}/>
           <input value={name} onChange={e=>setName(e.target.value)} placeholder="Имя" style={{flex:1,padding:"7px 10px",borderRadius:6,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:12}}/>
         </div>
-        <div style={{display:"flex",gap:6,marginBottom:10}}>
-          {Object.entries(ROLES).map(([value,meta])=><Btn key={value} onClick={()=>setRole(value)} color={role===value?C.a:C.m} bg={role===value?C.as:"transparent"}>{meta.icon} {meta.label}</Btn>)}
+        <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:10}}>
+          {Object.entries(ROLES).map(([value,meta])=><Btn key={value} onClick={()=>{setRole(value);if(value==="manager")setAllowReview(false);}} color={role===value?C.a:C.m} bg={role===value?C.as:"transparent"}>{meta.icon} {meta.label}</Btn>)}
+          {role==="editor"&&<label style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:C.m,marginLeft:6,cursor:"pointer"}}><input type="checkbox" checked={allowReview} onChange={e=>setAllowReview(e.target.checked)}/>⚡ Может ревьюить</label>}
         </div>
-        <Btn onClick={()=>{if(email.trim()&&name.trim()){onAdd({email:email.trim(),name:name.trim(),role});setEmail("");setName("");setRole("editor");}}} color={C.g} bg={C.gs}>+ Добавить</Btn>
+        <Btn onClick={()=>{if(email.trim()&&name.trim()){onAdd({email:email.trim(),name:name.trim(),role,canReview:role==="editor"&&allowReview});setEmail("");setName("");setRole("editor");setAllowReview(false);}}} color={C.g} bg={C.gs}>+ Добавить</Btn>
       </div>
     </div></div>;
 }
@@ -449,8 +459,20 @@ function exportFileName(batchName){
   return safe+"_annotation_export.xlsx";
 }
 
+function uniqueExportSheetName(title,usedNames){
+  const cleaned=String(title||"Диалог").replace(/[\\/*?:[\]]/g,"_").trim()||"Диалог";
+  let name=cleaned.substring(0,31),counter=2;
+  while(usedNames.has(name)){
+    const suffix=" ("+counter+")";
+    name=cleaned.substring(0,31-suffix.length)+suffix;
+    counter++;
+  }
+  usedNames.add(name);
+  return name;
+}
+
 async function exportXlsx(dialogues,fileName="annotation_export.xlsx"){
-  const XLSX=await import("xlsx");const wb=XLSX.utils.book_new();
+  const XLSX=await import("xlsx");const wb=XLSX.utils.book_new();const usedNames=new Set();
   for(const dlg of dialogues){
     const h2=["ID сессии","№","Диалоговая пара","Доска","Скриншот"].concat(CRITERIA_ORDER);
     const rows=[h2];
@@ -460,7 +482,7 @@ async function exportXlsx(dialogues,fileName="annotation_export.xlsx"){
       rows.push(row);
     }
     const ws=XLSX.utils.aoa_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb,ws,dlg.title.substring(0,31));
+    XLSX.utils.book_append_sheet(wb,ws,uniqueExportSheetName(dlg.title,usedNames));
   }
   XLSX.writeFile(wb,fileName);
 }
@@ -487,7 +509,7 @@ function DiffSummary({dialogue}){
 }
 
 /* ═══ ANNOTATOR SCREEN ═══ */
-function AnnotatorScreen({dialogue,user,onBack,showDiff}){
+function AnnotatorScreen({dialogue,user,onBack,showDiff,reviewAccess}){
   const[crIdx,setCrIdx]=useState(0);
   const[annotations,setAnnotations]=useState(dialogue.annotations||{});
   const[comments,setComments]=useState(dialogue.comments||{});
@@ -503,7 +525,7 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff}){
   const curDone=pairs.filter(p=>curScores[String(p.num)]!==undefined&&curScores[String(p.num)]!=="").length;
   const curDiffs=pairs.filter(p=>{const a=autoForCriterion[String(p.num)],m=curScores[String(p.num)];return a!==undefined&&a!==""&&m!==undefined&&m!==""&&String(a)!==String(m);}).length;
   const curComments=comments[code]||{};
-  const isReviewer=user.role==="manager"||user.role==="reviewer";
+  const isReviewer=!!reviewAccess;
   const currentCriterionReviewed=!!reviewedCriteria[code];
   const reviewedCount=CRITERIA_ORDER.filter(c=>!!reviewedCriteria[c]).length;
   const allCriteriaReviewed=reviewedCount===CRITERIA_ORDER.length;
@@ -673,6 +695,8 @@ export default function Home(){
   const[loading,setLoading]=useState(true);
   const[showDiff,setShowDiff]=useState(true);
   const[filterUser,setFilterUser]=useState("all");
+  const[workspaceMode,setWorkspaceMode]=useState("work");
+  const[selectedExportIds,setSelectedExportIds]=useState([]);
   const fileRef=useRef(null);
   const autoFileRef=useRef(null);
   const autoTargetBatchRef=useRef(null);
@@ -686,17 +710,28 @@ export default function Home(){
   useEffect(()=>{
     if(!user)return;
     const fresh=users.find(u=>u.email===user.email);
-    if(fresh&&fresh.role!==user.role)setUser(fresh);
+    if(fresh&&(fresh.role!==user.role||fresh.canReview!==user.canReview||fresh.name!==user.name))setUser(fresh);
   },[users,user]);
 
-  const mode=user?.role||"editor";
-  const canViewAuto=mode==="manager"||mode==="reviewer";
+  useEffect(()=>{
+    if(user&&!canReview(user)&&workspaceMode==="review")setWorkspaceMode("work");
+  },[user,workspaceMode]);
+
+  useEffect(()=>{
+    const existingIds=new Set(dialogues.map(d=>d.id));
+    setSelectedExportIds(ids=>ids.filter(id=>existingIds.has(id)));
+  },[dialogues]);
+
+  const mode=baseRole(user);
+  const reviewEnabled=canReview(user);
   const isManager=mode==="manager";
+  const inReviewMode=isManager||(reviewEnabled&&workspaceMode==="review");
+  const canViewAuto=inReviewMode;
   const editors=useMemo(()=>[...new Set(dialogues.map(d=>d.assignedTo).filter(Boolean))],[dialogues]);
   const userName=(email)=>{const u=users.find(u=>u.email===email);return u?u.name:email?email.split("@")[0]:"";};
   const editorCounts=useMemo(()=>{const c={};dialogues.forEach(d=>{if(d.assignedTo){c[d.assignedTo]=(c[d.assignedTo]||0)+1;}});return c;},[dialogues]);
-  let myDlgs=mode==="editor"?dialogues.filter(d=>d.assignedTo===user?.email||d.status==="unassigned"):dialogues;
-  if(mode==="manager"&&filterUser!=="all"){
+  let myDlgs=!isManager&&!inReviewMode?dialogues.filter(d=>d.assignedTo===user?.email||d.status==="unassigned"):dialogues;
+  if(isManager&&filterUser!=="all"){
     if(filterUser==="__none")myDlgs=myDlgs.filter(d=>!d.assignedTo);
     else myDlgs=myDlgs.filter(d=>d.assignedTo===filterUser);
   }
@@ -709,6 +744,25 @@ export default function Home(){
     return groups;
   },{})).sort((a,b)=>b.createdAt-a.createdAt);
   const allBatchDialogues=key=>dialogues.filter(d=>batchKey(d)===key);
+  const selectedExportSet=useMemo(()=>new Set(selectedExportIds),[selectedExportIds]);
+  const selectedDialogues=dialogues.filter(d=>selectedExportSet.has(d.id));
+
+  function toggleDialogueSelection(id){
+    setSelectedExportIds(ids=>ids.includes(id)?ids.filter(x=>x!==id):[...ids,id]);
+  }
+  function toggleBatchSelection(batchDialogues){
+    const ids=batchDialogues.map(d=>d.id);
+    const allSelected=ids.length>0&&ids.every(id=>selectedExportSet.has(id));
+    setSelectedExportIds(current=>{
+      const next=new Set(current);
+      ids.forEach(id=>allSelected?next.delete(id):next.add(id));
+      return[...next];
+    });
+  }
+  function selectDoneDialogues(batchDialogues){
+    const ids=batchDialogues.filter(d=>d.status==="done").map(d=>d.id);
+    setSelectedExportIds(current=>[...new Set([...current,...ids])]);
+  }
 
   async function handleImport(e){
     const file=e.target.files[0];if(!file)return;
@@ -805,19 +859,23 @@ export default function Home(){
   if(user&&sel){
     const sd=showDiff&&canViewAuto&&Object.keys(sel.autoScores||{}).length>0;
     return<><Head><title>Annotation — {sel.title}</title></Head>
-      <AnnotatorScreen dialogue={sel} user={user} onBack={()=>setSelId(null)} showDiff={sd}/></>;
+      <AnnotatorScreen dialogue={sel} user={user} onBack={()=>setSelId(null)} showDiff={sd} reviewAccess={inReviewMode}/></>;
   }
   if(!user)return<><Head><title>Annotation Tool</title></Head><LoginScreen users={users} onLogin={u=>setUser(u)}/></>;
   if(loading)return<div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",color:C.m}}>Загрузка...</div>;
 
   return<><Head><title>Annotation Tool — {user.name}</title></Head>
     <div style={{minHeight:"100vh",background:C.bg,color:C.t}}>
-      {showUsers&&<UsersModal users={users} onAdd={u=>set(ref(db,"ann_users/"+ek(u.email)),u)} onRemove={e=>remove(ref(db,"ann_users/"+ek(e)))} onRoleChange={(email,role)=>set(ref(db,"ann_users/"+ek(email)+"/role"),role)} onClose={()=>setShowUsers(false)}/>}
+      {showUsers&&<UsersModal users={users} onAdd={u=>set(ref(db,"ann_users/"+ek(u.email)),u)} onRemove={e=>remove(ref(db,"ann_users/"+ek(e)))} onRoleChange={(email,role)=>update(ref(db,"ann_users/"+ek(email)),{role,canReview:role==="manager"?null:canReview(users.find(u=>u.email===email))})} onReviewChange={(email,value)=>update(ref(db,"ann_users/"+ek(email)),{role:"editor",canReview:value})} onClose={()=>setShowUsers(false)}/>}
 
       <div style={{borderBottom:"1px solid "+C.b,padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:C.bg+"ee"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <span style={{fontSize:16,fontWeight:800}}><span style={{color:C.a}}>◈</span> Annotation Tool</span>
-          <span style={{fontSize:10,color:C.d,background:C.as,padding:"2px 8px",borderRadius:4}}>{user.name} • {roleIcon(mode)} {roleLabel(mode)}</span>
+          <span style={{fontSize:10,color:C.d,background:C.as,padding:"2px 8px",borderRadius:4}}>{user.name} • {roleIcon(user)} {roleLabel(user)}</span>
+          {!isManager&&reviewEnabled&&<div style={{display:"flex",gap:3,background:C.s3,border:"1px solid "+C.b,borderRadius:6,padding:2}}>
+            <button onClick={()=>setWorkspaceMode("work")} style={{padding:"3px 8px",border:0,borderRadius:4,background:workspaceMode==="work"?C.as:"transparent",color:workspaceMode==="work"?C.a:C.d,fontSize:9,fontWeight:600,cursor:"pointer"}}>✏️ Моя разметка</button>
+            <button onClick={()=>setWorkspaceMode("review")} style={{padding:"3px 8px",border:0,borderRadius:4,background:workspaceMode==="review"?C.ys:"transparent",color:workspaceMode==="review"?C.y:C.d,fontSize:9,fontWeight:600,cursor:"pointer"}}>⚡ Ревью</button>
+          </div>}
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center"}}>
           {canViewAuto&&<label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:C.m,cursor:"pointer"}}><input type="checkbox" checked={showDiff} onChange={e=>setShowDiff(e.target.checked)}/>⚡ Diff с auto</label>}
@@ -841,6 +899,14 @@ export default function Home(){
           <Btn onClick={()=>setFilterUser("__none")} color={filterUser==="__none"?C.a:C.m} bg={filterUser==="__none"?C.as:"transparent"} style={{fontSize:10}}>∅ ({dialogues.filter(d=>!d.assignedTo).length})</Btn>
         </div>}
 
+        {isManager&&dialogues.length>0&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"10px 12px",marginBottom:14,background:selectedDialogues.length?C.as:C.s,border:"1px solid "+(selectedDialogues.length?C.a+"50":C.b),borderRadius:9}}>
+          <div style={{fontSize:11,color:selectedDialogues.length?C.a:C.m}}><b>Выбрано для выгрузки: {selectedDialogues.length}</b><span style={{color:C.d}}> · отмечай диалоги или целые пулы</span></div>
+          <div style={{display:"flex",gap:6}}>
+            {selectedDialogues.length>0&&<Btn onClick={()=>setSelectedExportIds([])} color={C.m}>Снять выбор</Btn>}
+            <Btn onClick={()=>exportXlsx(selectedDialogues,"selected_"+selectedDialogues.length+"_annotation_export.xlsx")} disabled={selectedDialogues.length===0} color={C.a} bg={C.as}>↓ Скачать выбранное ({selectedDialogues.length})</Btn>
+          </div>
+        </div>}
+
         {myDlgs.length===0?
           <div style={{textAlign:"center",padding:"80px 20px",color:C.d}}><div style={{fontSize:40,marginBottom:12,opacity:.3}}>◇</div><div style={{fontSize:14}}>{mode==="manager"?"Импортируй диалоги":"Нет назначенных диалогов"}</div></div>:
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -848,6 +914,8 @@ export default function Home(){
               const fullBatch=allBatchDialogues(group.key);
               const doneCount=fullBatch.filter(d=>d.status==="done").length;
               const hiddenCount=fullBatch.length-group.dialogues.length;
+              const selectedInBatch=fullBatch.filter(d=>selectedExportSet.has(d.id)).length;
+              const allBatchSelected=fullBatch.length>0&&selectedInBatch===fullBatch.length;
               return<div key={group.key} style={{border:"1px solid "+C.b,borderRadius:12,overflow:"hidden",background:C.s2}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",borderBottom:"1px solid "+C.b,background:C.s3}}>
                   <div>
@@ -859,9 +927,14 @@ export default function Home(){
                     <div style={{fontSize:9,color:group.createdAt?C.m:C.d,marginTop:3}}>Загружено: {formatUploadDate(group.createdAt)}</div>
                     {hiddenCount>0&&<div style={{fontSize:9,color:C.d,marginTop:3}}>По текущему фильтру показано {group.dialogues.length} из {fullBatch.length}</div>}
                   </div>
-                  {mode==="manager"&&<div style={{display:"flex",gap:6}}>
+                  {isManager&&<div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+                    <label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:selectedInBatch?C.a:C.m,cursor:"pointer",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
+                      <input type="checkbox" checked={allBatchSelected} onChange={()=>toggleBatchSelection(fullBatch)}/>
+                      Весь пул{selectedInBatch>0?" ("+selectedInBatch+"/"+fullBatch.length+")":""}
+                    </label>
+                    <Btn onClick={()=>selectDoneDialogues(fullBatch)} disabled={doneCount===0} color={C.g} bg={C.gs}>✓ Выбрать готовые ({doneCount})</Btn>
                     <Btn onClick={()=>openAutoImport(group.key)} color={C.y} bg={C.ys}>🤖 Загрузить auto</Btn>
-                    <Btn onClick={()=>exportXlsx(fullBatch,exportFileName(group.name))} color={C.a} bg={C.as}>↓ Скачать корзинку</Btn>
+                    <Btn onClick={()=>exportXlsx(fullBatch,exportFileName(group.name))} color={C.a} bg={C.as}>↓ Скачать пул</Btn>
                   </div>}
                 </div>
                 <div style={{display:"flex",flexDirection:"column",gap:4,padding:8}}>
@@ -869,8 +942,10 @@ export default function Home(){
                     const tc=CRITERIA_ORDER.length*(dlg.pairs||[]).length;
                     const dc=CRITERIA_ORDER.reduce((s,c)=>{const ann=(dlg.annotations||{})[c]||{};return s+(dlg.pairs||[]).filter(p=>ann[String(p.num)]!==undefined&&ann[String(p.num)]!=="").length;},0);
                     const hasAuto=Object.keys(dlg.autoScores||{}).length>0;
+                    const isSelected=selectedExportSet.has(dlg.id);
 
-                    return<div key={dlg.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",background:C.s,border:"1px solid "+C.b,borderRadius:8,cursor:"pointer"}} onClick={()=>setSelId(dlg.id)}>
+                    return<div key={dlg.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",background:isSelected?C.as:C.s,border:"1px solid "+(isSelected?C.a+"70":C.b),borderRadius:8,cursor:"pointer"}} onClick={()=>setSelId(dlg.id)}>
+                      {isManager&&<label style={{display:"flex",alignItems:"center",alignSelf:"stretch",paddingRight:12,cursor:"pointer"}} onClick={e=>e.stopPropagation()}><input type="checkbox" checked={isSelected} onChange={()=>toggleDialogueSelection(dlg.id)} aria-label={"Выбрать "+dlg.title+" для выгрузки"}/></label>}
                       <div style={{flex:1}}>
                         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
                           <span style={{fontSize:13,fontWeight:600}}>{dlg.title}</span>
@@ -889,9 +964,9 @@ export default function Home(){
                         {mode==="manager"&&
                           <select onChange={e=>{if(e.target.value)assignDlg(dlg.id,e.target.value);}} value={dlg.assignedTo||""} style={{padding:"4px 8px",borderRadius:5,border:"1px solid "+C.b,background:C.bg,color:C.t,fontSize:11}}>
                             <option value="">Не назначен</option>
-                            {users.filter(u=>u.role==="editor").map(u=><option key={u.email} value={u.email}>{u.name}</option>)}
+                            {users.filter(u=>baseRole(u)==="editor").map(u=><option key={u.email} value={u.email}>{u.name}</option>)}
                           </select>}
-                        {mode==="editor"&&dlg.status==="unassigned"&&<Btn onClick={()=>assignDlg(dlg.id,user.email)} color={C.g} bg={C.gs}>Забрать →</Btn>}
+                        {mode==="editor"&&!inReviewMode&&dlg.status==="unassigned"&&<Btn onClick={()=>assignDlg(dlg.id,user.email)} color={C.g} bg={C.gs}>Забрать →</Btn>}
                         <Btn onClick={()=>setSelId(dlg.id)} color={C.a}>Открыть →</Btn>
                         {mode==="manager"&&<Btn onClick={()=>{if(confirm("Удалить «"+dlg.title+"»?"))remove(ref(db,"ann_dialogues/"+dlg.id));}} color={C.r} bg={C.rs}>🗑</Btn>}
                       </div>
