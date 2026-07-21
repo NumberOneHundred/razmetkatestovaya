@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { db, ref, set, onValue, update, remove } from "../lib/firebase";
+import { db, ref, set, onValue, update, remove, runTransaction } from "../lib/firebase";
 import { CRITERIA, CRITERIA_ORDER, GROUP_COLORS } from "../lib/criteria";
 import { parseBoardOps, renderBoardSvg } from "../lib/board";
 import { extractImages } from "../lib/images";
@@ -328,7 +328,7 @@ async function parseXlsx(file){
         for(let c2=4;c2<headers.length;c2++){
           const code=String(headers[c2]||"").trim();
           const val=row[c2];
-          if(code&&val!==undefined&&val!==null&&val!==""&&!code.includes("Комментарий")&&!code.includes("IFERROR")){
+          if(code&&val!==undefined&&val!==null&&val!==""&&!code.includes("Комментарий")&&!code.includes("IFERROR")&&!['Разметчик','Ревьюер','Время разметки','Время ревью'].includes(code)){
             if(!annotations[code])annotations[code]={};
             annotations[code][pairNum]=String(val);
           }
@@ -454,6 +454,38 @@ function formatUploadDate(value){
   }).format(new Date(ts));
 }
 
+
+function formatDuration(ms){
+  const totalSeconds=Math.max(0,Math.floor(Number(ms||0)/1000));
+  const hours=Math.floor(totalSeconds/3600);
+  const minutes=Math.floor((totalSeconds%3600)/60);
+  const seconds=totalSeconds%60;
+  const mm=String(minutes).padStart(2,"0"),ss=String(seconds).padStart(2,"0");
+  return hours>0?hours+":"+mm+":"+ss:mm+":"+ss;
+}
+
+function getAnnotators(dialogue){
+  const annotators=new Set();
+  Object.values(dialogue?.annotationCompletedByUsers||{}).forEach(info=>{
+    const email=typeof info==="string"?info:info?.email;
+    if(email)annotators.add(email);
+  });
+  if(dialogue?.annotationCompletedBy)annotators.add(dialogue.annotationCompletedBy);
+  if(annotators.size===0&&["review","done"].includes(dialogue?.status)&&dialogue?.assignedTo)annotators.add(dialogue.assignedTo);
+  return[...annotators];
+}
+
+function getReviewers(dialogue){
+  const reviewers=new Set();
+  Object.values(dialogue?.reviewedCriteria||{}).forEach(info=>{if(info?.by)reviewers.add(info.by);});
+  if(dialogue?.reviewCompletedBy)reviewers.add(dialogue.reviewCompletedBy);
+  return[...reviewers];
+}
+
+function getTimeSpent(dialogue,kind){
+  return Object.values(dialogue?.timeSpent?.[kind]||{}).reduce((sum,value)=>sum+Number(value||0),0);
+}
+
 function exportFileName(batchName){
   const safe=String(batchName||"annotation_export").replace(/[\\/:*?"<>|]/g,"_").trim()||"annotation_export";
   return safe+"_annotation_export.xlsx";
@@ -471,14 +503,22 @@ function uniqueExportSheetName(title,usedNames){
   return name;
 }
 
-async function exportXlsx(dialogues,fileName="annotation_export.xlsx"){
+async function exportXlsx(dialogues,fileName="annotation_export.xlsx",users=[]){
   const XLSX=await import("xlsx");const wb=XLSX.utils.book_new();const usedNames=new Set();
+  const personName=email=>{const found=users.find(u=>u.email===email);return found?.name||email||"";};
   for(const dlg of dialogues){
-    const h2=["ID сессии","№","Диалоговая пара","Доска","Скриншот"].concat(CRITERIA_ORDER);
+    const annotators=getAnnotators(dlg).map(personName).filter(Boolean).join(", ");
+    const reviewers=getReviewers(dlg).map(personName).filter(Boolean).join(", ");
+    const annotationTimeMs=getTimeSpent(dlg,"annotation");
+    const reviewTimeMs=getTimeSpent(dlg,"review");
+    const annotationTime=annotationTimeMs?formatDuration(annotationTimeMs):"";
+    const reviewTime=reviewTimeMs?formatDuration(reviewTimeMs):"";
+    const h2=["ID сессии","№","Диалоговая пара","Доска","Скриншот"].concat(CRITERIA_ORDER,["Разметчик","Ревьюер","Время разметки","Время ревью"]);
     const rows=[h2];
     for(const pair of(dlg.pairs||[])){
       const row=[dlg.sessionId||"",pair.num,pair.text,pair.board,pair.image];
       for(const code of CRITERIA_ORDER){const ann=(dlg.annotations||{})[code];row.push(ann?ann[String(pair.num)]||"":"");}
+      row.push(annotators,reviewers,annotationTime,reviewTime);
       rows.push(row);
     }
     const ws=XLSX.utils.aoa_to_sheet(rows);
@@ -526,9 +566,64 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff,reviewAccess}){
   const curDiffs=pairs.filter(p=>{const a=autoForCriterion[String(p.num)],m=curScores[String(p.num)];return a!==undefined&&a!==""&&m!==undefined&&m!==""&&String(a)!==String(m);}).length;
   const curComments=comments[code]||{};
   const isReviewer=!!reviewAccess;
+  const timerKind=isReviewer?"review":"annotation";
+  const timerUserKey=ek(user.email);
+  const initialElapsed=Number(dialogue.timeSpent?.[timerKind]?.[timerUserKey]||0);
+  const[elapsedMs,setElapsedMs]=useState(initialElapsed);
   const currentCriterionReviewed=!!reviewedCriteria[code];
   const reviewedCount=CRITERIA_ORDER.filter(c=>!!reviewedCriteria[c]).length;
   const allCriteriaReviewed=reviewedCount===CRITERIA_ORDER.length;
+
+  useEffect(()=>{
+    const isActive=()=>document.visibilityState==="visible"&&document.hasFocus();
+    let lastTick=isActive()?Date.now():null;
+    let pendingMs=0;
+    let flushing=false;
+
+    const flush=async()=>{
+      if(flushing||pendingMs<1)return;
+      const delta=Math.floor(pendingMs);pendingMs-=delta;flushing=true;let saved=false;
+      try{
+        await runTransaction(ref(db,"ann_dialogues/"+dialogue.id+"/timeSpent/"+timerKind+"/"+timerUserKey),current=>Number(current||0)+delta);
+        saved=true;
+      }catch(err){
+        pendingMs+=delta;
+        console.warn("Timer save failed:",err);
+      }finally{
+        flushing=false;
+        if(saved&&pendingMs>=1)flush();
+      }
+    };
+    const addActiveDelta=()=>{
+      if(lastTick===null)return;
+      const now=Date.now();
+      const delta=Math.max(0,Math.min(now-lastTick,5000));
+      if(delta>0){pendingMs+=delta;setElapsedMs(value=>value+delta);}
+      lastTick=now;
+    };
+    const tick=()=>{
+      if(!isActive()){lastTick=null;return;}
+      if(lastTick===null)lastTick=Date.now();
+      else addActiveDelta();
+      if(pendingMs>=15000)flush();
+    };
+    const pause=()=>{addActiveDelta();lastTick=null;flush();};
+    const resume=()=>{if(isActive())lastTick=Date.now();};
+    const onVisibility=()=>{if(isActive())resume();else pause();};
+    const onBeforeUnload=()=>{pause();};
+    const interval=setInterval(tick,1000);
+    document.addEventListener("visibilitychange",onVisibility);
+    window.addEventListener("focus",resume);
+    window.addEventListener("blur",pause);
+    window.addEventListener("beforeunload",onBeforeUnload);
+    return()=>{
+      pause();clearInterval(interval);
+      document.removeEventListener("visibilitychange",onVisibility);
+      window.removeEventListener("focus",resume);
+      window.removeEventListener("blur",pause);
+      window.removeEventListener("beforeunload",onBeforeUnload);
+    };
+  },[dialogue.id,timerKind,timerUserKey]);
 
   function invalidateCriterionReview(criterionCode){
     if(!reviewedCriteria[criterionCode])return;
@@ -572,7 +667,12 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff,reviewAccess}){
   function handleFinish(){
     update(ref(db),{
       ["ann_dialogues/"+dialogue.id+"/status"]:"review",
-      ["ann_dialogues/"+dialogue.id+"/reviewedCriteria"]:null
+      ["ann_dialogues/"+dialogue.id+"/reviewedCriteria"]:null,
+      ["ann_dialogues/"+dialogue.id+"/annotationCompletedBy"]:user.email,
+      ["ann_dialogues/"+dialogue.id+"/annotationCompletedAt"]:Date.now(),
+      ["ann_dialogues/"+dialogue.id+"/annotationCompletedByUsers/"+ek(user.email)]:{email:user.email,at:Date.now()},
+      ["ann_dialogues/"+dialogue.id+"/reviewCompletedBy"]:null,
+      ["ann_dialogues/"+dialogue.id+"/reviewCompletedAt"]:null
     });
     onBack();
   }
@@ -581,13 +681,19 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff,reviewAccess}){
       alert("Сначала прими все критерии: сейчас проверено "+reviewedCount+" из "+CRITERIA_ORDER.length+".");
       return;
     }
-    set(ref(db,"ann_dialogues/"+dialogue.id+"/status"),"done");onBack();
+    update(ref(db),{
+      ["ann_dialogues/"+dialogue.id+"/status"]:"done",
+      ["ann_dialogues/"+dialogue.id+"/reviewCompletedBy"]:user.email,
+      ["ann_dialogues/"+dialogue.id+"/reviewCompletedAt"]:Date.now()
+    });onBack();
   }
   function handleReject(){
     setReviewedCriteria({});
     update(ref(db),{
       ["ann_dialogues/"+dialogue.id+"/status"]:"annotating",
-      ["ann_dialogues/"+dialogue.id+"/reviewedCriteria"]:null
+      ["ann_dialogues/"+dialogue.id+"/reviewedCriteria"]:null,
+      ["ann_dialogues/"+dialogue.id+"/reviewCompletedBy"]:null,
+      ["ann_dialogues/"+dialogue.id+"/reviewCompletedAt"]:null
     });
     onBack();
   }
@@ -601,6 +707,7 @@ function AnnotatorScreen({dialogue,user,onBack,showDiff,reviewAccess}){
         {dialogue.sessionId&&<span style={{fontSize:9,color:C.d,background:C.s3,padding:"2px 6px",borderRadius:3,fontFamily:"'JetBrains Mono',monospace"}}>ID: {dialogue.sessionId.substring(0,8)}...</span>}
       </div>
       <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <span title={isReviewer?"Активное время ревью":"Активное время разметки"} style={{fontSize:11,fontWeight:700,color:isReviewer?C.y:C.a,background:isReviewer?C.ys:C.as,border:"1px solid "+(isReviewer?C.y:C.a)+"35",padding:"4px 8px",borderRadius:6}}>⏱ {formatDuration(elapsedMs)}</span>
         <div style={{width:120}}><Progress done={doneCells} total={totalCells}/></div>
         <span style={{fontSize:10,color:C.d}}>{doneCells}/{totalCells}</span>
       </div>
@@ -697,6 +804,7 @@ export default function Home(){
   const[filterUser,setFilterUser]=useState("all");
   const[workspaceMode,setWorkspaceMode]=useState("work");
   const[selectedExportIds,setSelectedExportIds]=useState([]);
+  const[collapsedBatches,setCollapsedBatches]=useState({});
   const fileRef=useRef(null);
   const autoFileRef=useRef(null);
   const autoTargetBatchRef=useRef(null);
@@ -722,6 +830,13 @@ export default function Home(){
     setSelectedExportIds(ids=>ids.filter(id=>existingIds.has(id)));
   },[dialogues]);
 
+  useEffect(()=>{
+    try{
+      const saved=window.localStorage.getItem("ann_collapsed_batches");
+      if(saved)setCollapsedBatches(JSON.parse(saved)||{});
+    }catch(err){console.warn("Could not restore collapsed pools:",err);}
+  },[]);
+
   const mode=baseRole(user);
   const reviewEnabled=canReview(user);
   const isManager=mode==="manager";
@@ -746,6 +861,14 @@ export default function Home(){
   const allBatchDialogues=key=>dialogues.filter(d=>batchKey(d)===key);
   const selectedExportSet=useMemo(()=>new Set(selectedExportIds),[selectedExportIds]);
   const selectedDialogues=dialogues.filter(d=>selectedExportSet.has(d.id));
+  const completedTaskCount=useMemo(()=>{
+    if(!user)return 0;
+    return dialogues.filter(d=>{
+      if(d.annotationCompletedByUsers?.[ek(user.email)])return true;
+      if(d.annotationCompletedBy)return d.annotationCompletedBy===user.email;
+      return ["review","done"].includes(d.status)&&d.assignedTo===user.email;
+    }).length;
+  },[dialogues,user]);
 
   function toggleDialogueSelection(id){
     setSelectedExportIds(ids=>ids.includes(id)?ids.filter(x=>x!==id):[...ids,id]);
@@ -762,6 +885,22 @@ export default function Home(){
   function selectDoneDialogues(batchDialogues){
     const ids=batchDialogues.filter(d=>d.status==="done").map(d=>d.id);
     setSelectedExportIds(current=>[...new Set([...current,...ids])]);
+  }
+  function toggleBatchCollapsed(key){
+    setCollapsedBatches(current=>{
+      const next={...current,[key]:!current[key]};
+      try{window.localStorage.setItem("ann_collapsed_batches",JSON.stringify(next));}catch(err){console.warn("Could not save collapsed pools:",err);}
+      return next;
+    });
+  }
+  async function deleteBatch(group,batchDialogues){
+    const count=batchDialogues.length;
+    if(count===0)return;
+    const legacyWarning=group.key==="__legacy"?" Это удалит все диалоги из блока старых загрузок.":"";
+    if(!confirm("Удалить пул «"+group.name+"» и все его диалоги ("+count+")?"+legacyWarning+" Действие нельзя отменить."))return;
+    const removals={};
+    batchDialogues.forEach(d=>{removals["ann_dialogues/"+d.id]=null;});
+    await update(ref(db),removals);
   }
 
   async function handleImport(e){
@@ -872,6 +1011,7 @@ export default function Home(){
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <span style={{fontSize:16,fontWeight:800}}><span style={{color:C.a}}>◈</span> Annotation Tool</span>
           <span style={{fontSize:10,color:C.d,background:C.as,padding:"2px 8px",borderRadius:4}}>{user.name} • {roleIcon(user)} {roleLabel(user)}</span>
+          {!isManager&&<span title="Завершённые тобой задания; для старых диалогов считается по назначению" style={{fontSize:10,color:C.g,background:C.gs,border:"1px solid "+C.g+"25",padding:"2px 8px",borderRadius:4}}>✓ Выполнено: {completedTaskCount}</span>}
           {!isManager&&reviewEnabled&&<div style={{display:"flex",gap:3,background:C.s3,border:"1px solid "+C.b,borderRadius:6,padding:2}}>
             <button onClick={()=>setWorkspaceMode("work")} style={{padding:"3px 8px",border:0,borderRadius:4,background:workspaceMode==="work"?C.as:"transparent",color:workspaceMode==="work"?C.a:C.d,fontSize:9,fontWeight:600,cursor:"pointer"}}>✏️ Моя разметка</button>
             <button onClick={()=>setWorkspaceMode("review")} style={{padding:"3px 8px",border:0,borderRadius:4,background:workspaceMode==="review"?C.ys:"transparent",color:workspaceMode==="review"?C.y:C.d,fontSize:9,fontWeight:600,cursor:"pointer"}}>⚡ Ревью</button>
@@ -882,7 +1022,7 @@ export default function Home(){
           {isManager&&<><Btn onClick={()=>fileRef.current?.click()} color={C.g} bg={C.gs}>+ Импорт</Btn><input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleImport} style={{display:"none"}}/>
           <input ref={autoFileRef} type="file" accept=".xlsx,.xls" onChange={handleAutoImport} style={{display:"none"}}/>
           <Btn onClick={()=>setShowUsers(true)} color={C.bl} bg={C.bls}>👥</Btn>
-          {dialogues.length>0&&<Btn onClick={()=>exportXlsx(dialogues)} color={C.a} bg={C.as}>↓ Экспорт всего</Btn>}</>}
+          {dialogues.length>0&&<Btn onClick={()=>exportXlsx(dialogues,"annotation_export.xlsx",users)} color={C.a} bg={C.as}>↓ Экспорт всего</Btn>}</>}
           <Btn onClick={()=>setUser(null)} color={C.r} bg={C.rs}>Выйти</Btn>
         </div>
       </div>
@@ -903,7 +1043,7 @@ export default function Home(){
           <div style={{fontSize:11,color:selectedDialogues.length?C.a:C.m}}><b>Выбрано для выгрузки: {selectedDialogues.length}</b><span style={{color:C.d}}> · отмечай диалоги или целые пулы</span></div>
           <div style={{display:"flex",gap:6}}>
             {selectedDialogues.length>0&&<Btn onClick={()=>setSelectedExportIds([])} color={C.m}>Снять выбор</Btn>}
-            <Btn onClick={()=>exportXlsx(selectedDialogues,"selected_"+selectedDialogues.length+"_annotation_export.xlsx")} disabled={selectedDialogues.length===0} color={C.a} bg={C.as}>↓ Скачать выбранное ({selectedDialogues.length})</Btn>
+            <Btn onClick={()=>exportXlsx(selectedDialogues,"selected_"+selectedDialogues.length+"_annotation_export.xlsx",users)} disabled={selectedDialogues.length===0} color={C.a} bg={C.as}>↓ Скачать выбранное ({selectedDialogues.length})</Btn>
           </div>
         </div>}
 
@@ -916,9 +1056,12 @@ export default function Home(){
               const hiddenCount=fullBatch.length-group.dialogues.length;
               const selectedInBatch=fullBatch.filter(d=>selectedExportSet.has(d.id)).length;
               const allBatchSelected=fullBatch.length>0&&selectedInBatch===fullBatch.length;
+              const collapsed=!!collapsedBatches[group.key];
               return<div key={group.key} style={{border:"1px solid "+C.b,borderRadius:12,overflow:"hidden",background:C.s2}}>
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",borderBottom:"1px solid "+C.b,background:C.s3}}>
-                  <div>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",borderBottom:collapsed?"none":"1px solid "+C.b,background:C.s3}}>
+                  <div style={{display:"flex",alignItems:"flex-start",gap:8,minWidth:0}}>
+                    <button onClick={()=>toggleBatchCollapsed(group.key)} title={collapsed?"Развернуть пул":"Свернуть пул"} style={{width:24,height:24,borderRadius:5,border:"1px solid "+C.b,background:C.bg,color:C.m,cursor:"pointer",flexShrink:0}}>{collapsed?"▶":"▼"}</button>
+                    <div>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
                       <span style={{fontSize:14,fontWeight:700,color:C.t}}>▣ {group.name}</span>
                       <span style={{fontSize:10,color:C.m}}>{fullBatch.length} диалогов</span>
@@ -926,6 +1069,7 @@ export default function Home(){
                     </div>
                     <div style={{fontSize:9,color:group.createdAt?C.m:C.d,marginTop:3}}>Загружено: {formatUploadDate(group.createdAt)}</div>
                     {hiddenCount>0&&<div style={{fontSize:9,color:C.d,marginTop:3}}>По текущему фильтру показано {group.dialogues.length} из {fullBatch.length}</div>}
+                    </div>
                   </div>
                   {isManager&&<div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
                     <label style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:selectedInBatch?C.a:C.m,cursor:"pointer",whiteSpace:"nowrap"}} onClick={e=>e.stopPropagation()}>
@@ -934,10 +1078,11 @@ export default function Home(){
                     </label>
                     <Btn onClick={()=>selectDoneDialogues(fullBatch)} disabled={doneCount===0} color={C.g} bg={C.gs}>✓ Выбрать готовые ({doneCount})</Btn>
                     <Btn onClick={()=>openAutoImport(group.key)} color={C.y} bg={C.ys}>🤖 Загрузить auto</Btn>
-                    <Btn onClick={()=>exportXlsx(fullBatch,exportFileName(group.name))} color={C.a} bg={C.as}>↓ Скачать пул</Btn>
+                    <Btn onClick={()=>exportXlsx(fullBatch,exportFileName(group.name),users)} color={C.a} bg={C.as}>↓ Скачать пул</Btn>
+                    <Btn onClick={()=>deleteBatch(group,fullBatch)} color={C.r} bg={C.rs}>🗑 Удалить всё</Btn>
                   </div>}
                 </div>
-                <div style={{display:"flex",flexDirection:"column",gap:4,padding:8}}>
+                {!collapsed&&<div style={{display:"flex",flexDirection:"column",gap:4,padding:8}}>
                   {group.dialogues.map(dlg=>{
                     const tc=CRITERIA_ORDER.length*(dlg.pairs||[]).length;
                     const dc=CRITERIA_ORDER.reduce((s,c)=>{const ann=(dlg.annotations||{})[c]||{};return s+(dlg.pairs||[]).filter(p=>ann[String(p.num)]!==undefined&&ann[String(p.num)]!=="").length;},0);
@@ -971,7 +1116,7 @@ export default function Home(){
                         {mode==="manager"&&<Btn onClick={()=>{if(confirm("Удалить «"+dlg.title+"»?"))remove(ref(db,"ann_dialogues/"+dlg.id));}} color={C.r} bg={C.rs}>🗑</Btn>}
                       </div>
                     </div>;})}
-                </div>
+                </div>}
               </div>;})}
           </div>}
       </div>
